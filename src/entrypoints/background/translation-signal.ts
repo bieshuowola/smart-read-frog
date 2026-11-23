@@ -1,0 +1,339 @@
+import type { LanguageTag } from "@read-frog/definitions"
+import type { FeatureUsageContext } from "@/types/analytics"
+import type { Config } from "@/types/config/config"
+import type { TabSmartDecisionState } from "@/utils/smart-translate/types"
+import { browser, storage } from "#imports"
+import { ANALYTICS_FEATURE, ANALYTICS_SURFACE } from "@/types/analytics"
+import { createFeatureUsageContext } from "@/utils/analytics"
+import { normalizeDetectedCode } from "@/utils/config/languages"
+import { CONFIG_STORAGE_KEY, DEFAULT_DETECTED_CODE } from "@/utils/constants/config"
+import {
+  getDetectedCodeStateKey,
+  getSmartPageDecisionStateKey,
+  getTranslationStateKey,
+} from "@/utils/constants/storage-keys"
+import { shouldEnableAutoTranslation } from "@/utils/host/translate/auto-translation"
+import { createLogger } from "@/utils/logging/logger"
+import { onMessage, sendMessage } from "@/utils/message"
+import { getPageTranslationOriginScope } from "@/utils/url"
+import {
+  injectHostContentIntoCurrentTabIframesAfterNodeTranslation,
+  injectHostContentIntoTabIframes,
+} from "./iframe-injection"
+import {
+  getPageTranslationEnabled,
+  getPageTranslationState,
+  isAutoTranslationSuppressed,
+  isPageTranslationStateInUrlScope,
+  setPageTranslationEnabled,
+} from "./page-translation-state"
+
+const log = createLogger("background/translation-signal")
+
+// Tabs Read Frog does not run in (browser pages, the store) have no receiver,
+// so this failing is routine and kept out of the local log.
+function notifyPageTranslationStateChanged(tabId: number, enabled: boolean) {
+  void sendMessage("notifyTranslationStateChanged", { enabled }, tabId).catch((error) =>
+    log.debug("Failed to notify page translation state change", { error }),
+  )
+}
+
+function requestManagerToTogglePageTranslation(
+  tabId: number,
+  enabled: boolean,
+  analyticsContext?: FeatureUsageContext<"page_translation">,
+) {
+  void sendMessage("askManagerToTogglePageTranslation", { enabled, analyticsContext }, tabId).catch(
+    (error) => log.warn("Failed to ask page translation manager to toggle", { error }),
+  )
+}
+
+function isIframe(frameId: number | undefined): boolean {
+  return frameId !== undefined && frameId !== 0
+}
+
+async function getDetectedCodeForTab(tabId: number): Promise<LanguageTag> {
+  const storedCode = await storage.getItem<unknown>(getDetectedCodeStateKey(tabId))
+  return normalizeDetectedCode(storedCode)
+}
+
+function notifyDetectedCodeChanged(detectedCode: LanguageTag) {
+  void sendMessage("detectedPageLanguageChanged", { detectedCode })
+    // The popup is often closed, so having no receiver is expected.
+    .catch(() => {})
+}
+
+function notifySmartPageDecisionChanged(decision: TabSmartDecisionState | null) {
+  void sendMessage("smartPageDecisionChanged", { decision }).catch(() => {})
+}
+
+async function getSmartDecisionForTab(tabId: number): Promise<TabSmartDecisionState | null> {
+  const stored = await storage.getItem<TabSmartDecisionState>(getSmartPageDecisionStateKey(tabId))
+  if (!stored) return null
+  const state = await getPageTranslationState(tabId)
+  return {
+    ...stored,
+    userSuppressed: isAutoTranslationSuppressed(state, stored.url),
+  }
+}
+
+async function isActiveCurrentWindowTab(tabId: number): Promise<boolean> {
+  const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true })
+  return activeTab?.id === tabId
+}
+
+async function publishCachedDetectedCodeForTab(tabId: number): Promise<void> {
+  notifyDetectedCodeChanged(await getDetectedCodeForTab(tabId))
+  notifySmartPageDecisionChanged(await getSmartDecisionForTab(tabId))
+}
+
+// Sent to every tab that becomes active, including those with no receiver.
+function requestDetectedPageLanguageRefresh(tabId: number) {
+  void sendMessage("refreshDetectedPageLanguage", undefined, tabId).catch((error) =>
+    log.debug("Failed to refresh detected page language", { error }),
+  )
+}
+
+async function publishAndRefreshActiveTab(tabId: number): Promise<void> {
+  await publishCachedDetectedCodeForTab(tabId)
+  requestDetectedPageLanguageRefresh(tabId)
+}
+
+export function translationMessage() {
+  onMessage("getEnablePageTranslationByTabId", async (msg) => {
+    const { tabId } = msg.data
+    return await getTranslationState(tabId)
+  })
+
+  onMessage("getEnablePageTranslationFromContentScript", async (msg) => {
+    const tabId = msg.sender?.tab?.id
+    if (typeof tabId === "number") {
+      return await getTranslationState(tabId)
+    }
+    log.error("Invalid tabId in getEnablePageTranslationFromContentScript", {
+      data: msg.data,
+      sender: msg.sender,
+    })
+    return false
+  })
+
+  onMessage("ensureIframeHostContentInjected", async (msg) => {
+    const tabId = msg.data?.tabId ?? msg.sender?.tab?.id
+    if (typeof tabId === "number") {
+      await injectHostContentIntoTabIframes(tabId)
+      return
+    }
+
+    log.error("Invalid tabId in ensureIframeHostContentInjected", {
+      data: msg.data,
+      sender: msg.sender,
+    })
+  })
+
+  onMessage("injectCurrentIframesAfterTopFrameNodeTranslation", async (msg) => {
+    const tabId = msg.sender?.tab?.id
+    const frameId = msg.sender?.frameId
+
+    if (typeof tabId === "number" && frameId === 0) {
+      await injectHostContentIntoCurrentTabIframesAfterNodeTranslation(tabId)
+      return
+    }
+
+    log.error("Invalid sender in injectCurrentIframesAfterTopFrameNodeTranslation", {
+      data: msg.data,
+      sender: msg.sender,
+    })
+  })
+
+  onMessage("reportDetectedPageLanguage", async (msg) => {
+    const tabId = msg.sender?.tab?.id
+    const { url, detectedCodeOrUnd, smartDecision } = msg.data
+    if (typeof tabId === "number") {
+      const detectedCode = normalizeDetectedCode(detectedCodeOrUnd)
+      await storage.setItem<LanguageTag>(getDetectedCodeStateKey(tabId), detectedCode)
+
+      const state = await getPageTranslationState(tabId)
+      const suppressed = isAutoTranslationSuppressed(state, url)
+
+      if (smartDecision) {
+        const tabDecision: TabSmartDecisionState = {
+          ...smartDecision,
+          url,
+          updatedAt: Date.now(),
+          userSuppressed: suppressed,
+        }
+        await storage.setItem<TabSmartDecisionState>(getSmartPageDecisionStateKey(tabId), tabDecision)
+        if (await isActiveCurrentWindowTab(tabId)) {
+          notifyDetectedCodeChanged(detectedCode)
+          notifySmartPageDecisionChanged(tabDecision)
+        }
+      } else if (await isActiveCurrentWindowTab(tabId)) {
+        notifyDetectedCodeChanged(detectedCode)
+      }
+
+      const config = await storage.getItem<Config>(`local:${CONFIG_STORAGE_KEY}`)
+      if (!config) return
+
+      const shouldEnable = smartDecision
+        ? await shouldEnableAutoTranslation(url, detectedCodeOrUnd, config, smartDecision)
+        : await shouldEnableAutoTranslation(url, detectedCodeOrUnd, config)
+      if (shouldEnable) {
+        // Honor an explicit user refusal for this origin (#2011): language is
+        // re-detected on every tab activation, so without this check a manual
+        // "show original" would be force-overridden on the next tab switch.
+        if (suppressed) return
+
+        requestManagerToTogglePageTranslation(
+          tabId,
+          true,
+          createFeatureUsageContext(
+            ANALYTICS_FEATURE.PAGE_TRANSLATION,
+            ANALYTICS_SURFACE.PAGE_AUTO,
+          ),
+        )
+      }
+      return
+    }
+
+    log.error("Invalid tabId in reportDetectedPageLanguage", { data: msg.data, sender: msg.sender })
+  })
+
+  onMessage("getSmartPageDecision", async (msg) => {
+    const explicitTabId = msg.data?.tabId
+    if (typeof explicitTabId === "number") {
+      return await getSmartDecisionForTab(explicitTabId)
+    }
+
+    const senderTabId = msg.sender?.tab?.id
+    if (typeof senderTabId === "number") {
+      return await getSmartDecisionForTab(senderTabId)
+    }
+
+    const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true })
+    if (typeof activeTab?.id === "number") {
+      return await getSmartDecisionForTab(activeTab.id)
+    }
+
+    return null
+  })
+
+  onMessage("getDetectedCode", async (msg) => {
+    const tabId = msg.sender?.tab?.id
+    if (typeof tabId === "number") {
+      return await getDetectedCodeForTab(tabId)
+    }
+
+    const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true })
+    if (typeof activeTab?.id === "number") {
+      return await getDetectedCodeForTab(activeTab.id)
+    }
+
+    return DEFAULT_DETECTED_CODE
+  })
+
+  onMessage("tryToSetEnablePageTranslationByTabId", async (msg) => {
+    const { tabId, enabled, analyticsContext } = msg.data
+    if (!enabled) {
+      // Record the user's refusal before asking the manager to stop, so a
+      // concurrent tab-activation re-detection cannot re-enable in between.
+      const tabUrl = await browser.tabs
+        .get(tabId)
+        .then((tab) => tab.url)
+        .catch(() => undefined)
+      await setPageTranslationEnabled(tabId, false, tabUrl, true)
+      notifyPageTranslationStateChanged(tabId, false)
+    }
+    requestManagerToTogglePageTranslation(tabId, enabled, analyticsContext)
+  })
+
+  onMessage("tryToSetEnablePageTranslationOnContentScript", async (msg) => {
+    const tabId = msg.sender?.tab?.id
+    const { enabled, analyticsContext } = msg.data
+    if (typeof tabId === "number") {
+      log.debug("sending tryToSetEnablePageTranslationOnContentScript to manager", {
+        enabled,
+        tabId,
+      })
+      if (!enabled) {
+        await setPageTranslationEnabled(tabId, false, msg.sender?.tab?.url, true)
+        notifyPageTranslationStateChanged(tabId, false)
+      }
+      requestManagerToTogglePageTranslation(tabId, enabled, analyticsContext)
+    } else {
+      log.error("tabId is not a number", { data: msg.data, sender: msg.sender })
+    }
+  })
+
+  onMessage("setAndNotifyPageTranslationStateChangedByManager", async (msg) => {
+    const tabId = msg.sender?.tab?.id
+    const { enabled, url, userInitiated } = msg.data
+    if (typeof tabId === "number") {
+      const senderFrameId = msg.sender?.frameId
+
+      if (isIframe(senderFrameId)) {
+        // Iframe echoes only synchronize UI; they must not write tab-level
+        // state (including the userDisabled marker) because that state is
+        // scoped to the top-frame origin and iframe echoes carry iframe URLs.
+        // Only re-broadcast when the echo agrees with the stored state, so an
+        // iframe-only stop cannot make the UI contradict a still-translating
+        // top frame.
+        const currentEnabled = await getPageTranslationEnabled(tabId)
+        if (enabled !== currentEnabled) return
+
+        notifyPageTranslationStateChanged(tabId, currentEnabled)
+        return
+      }
+
+      await setPageTranslationEnabled(tabId, enabled, url ?? msg.sender?.tab?.url, userInitiated)
+      notifyPageTranslationStateChanged(tabId, enabled)
+
+      if (enabled) {
+        void injectHostContentIntoTabIframes(tabId)
+      }
+    } else {
+      log.error("tabId is not a number", { data: msg.data, sender: msg.sender })
+    }
+  })
+
+  // === Helper Functions ===
+  async function getTranslationState(tabId: number): Promise<boolean> {
+    return await getPageTranslationEnabled(tabId)
+  }
+
+  // === Cleanup ===
+  browser.tabs.onRemoved.addListener(async (tabId) => {
+    await storage.removeItem(getTranslationStateKey(tabId))
+    await storage.removeItem(getDetectedCodeStateKey(tabId))
+    await storage.removeItem(getSmartPageDecisionStateKey(tabId))
+  })
+
+  browser.tabs.onActivated.addListener(async (activeInfo) => {
+    await publishAndRefreshActiveTab(activeInfo.tabId)
+  })
+
+  // Clear translation state only when the tab leaves the origin where it was
+  // enabled (or where the user manually disabled it).
+  browser.webNavigation.onCommitted.addListener(async (details) => {
+    // Only handle main frame navigations, not iframes
+    if (details.frameId !== 0) return
+
+    const state = await getPageTranslationState(details.tabId)
+    if (!state) return
+
+    if (state.enabled) {
+      if (isPageTranslationStateInUrlScope(state, details.url)) return
+
+      await storage.removeItem(getTranslationStateKey(details.tabId))
+      return
+    }
+
+    // A user's manual-off marker only applies to the origin it was set on;
+    // clear it once the tab commits to a different origin (or an origin-less
+    // URL like chrome://) so other sites keep auto-translating.
+    if (state.userDisabled) {
+      if (state.origin && state.origin === getPageTranslationOriginScope(details.url)) return
+
+      await storage.removeItem(getTranslationStateKey(details.tabId))
+    }
+  })
+}

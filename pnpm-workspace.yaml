@@ -1,0 +1,22 @@
+minimumReleaseAge: 0
+
+shellEmulator: true
+
+trustPolicy: no-downgrade
+
+trustPolicyExclude:
+  - react-redux@9.2.0
+  - reselect@5.1.1
+  - semver@6.3.1
+  - why-is-node-running@3.2.2
+
+allowBuilds:
+  core-js: true
+  esbuild: true
+  msw: true
+  nx: true
+  spawn-sync: true
+
+overrides:
+  # @modyfi/vite-plugin-yaml@1.1.1 (latest) pins js-yaml 4.1.0, which has open advisories fixed in 4.3.2.
+  "@modyfi/vite-plugin-yaml>js-yaml": ^4.3.2

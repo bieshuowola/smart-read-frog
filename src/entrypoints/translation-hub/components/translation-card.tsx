@@ -1,0 +1,394 @@
+import type { ErrorAction } from "@/utils/error-action"
+import { Icon } from "@iconify/react"
+import { LANGUAGE_ENGLISH_NAMES } from "@read-frog/definitions"
+import { useMutation } from "@tanstack/react-query"
+import { useAtom, useAtomValue, useSetAtom } from "jotai"
+import { useEffect, useEffectEvent, useRef } from "react"
+import { ModelIcon } from "@/components/llm-providers/model-icon"
+import { useBuiltInAiModels } from "@/components/llm-providers/use-built-in-ai-models"
+import ProviderIcon from "@/components/provider-icon"
+import { useTheme } from "@/components/providers/theme-provider"
+import { Button } from "@/components/ui/base-ui/button"
+import { anchoredToastManager } from "@/components/ui/base-ui/toast"
+import { selectTTSVoice, useTextToSpeech } from "@/hooks/use-text-to-speech"
+import { ANALYTICS_FEATURE, ANALYTICS_SURFACE } from "@/types/analytics"
+import { isLLMProviderConfig } from "@/types/config/provider"
+import { createFeatureUsageContext, trackFeatureAttempt } from "@/utils/analytics"
+import { classifyResolvedProvider } from "@/utils/analytics-provider"
+import { configFieldsAtomMap } from "@/utils/atoms/config"
+import { PROVIDER_ITEMS } from "@/utils/constants/providers"
+import { streamBackgroundText } from "@/utils/content-script/background-stream-client"
+import { getRandomUUID } from "@/utils/crypto-polyfill"
+import { logInAction, upgradeAction } from "@/utils/error-action"
+import { resolveGlossaryTerms } from "@/utils/glossary/active-matcher"
+import { executeTranslate } from "@/utils/host/translate/execute-translate"
+import { prepareTranslationText } from "@/utils/host/translate/text-preparation"
+import { findHostedAiModel } from "@/utils/hosted-ai/models"
+import { getBuiltInAiRefusalKind } from "@/utils/hosted-ai/refusal"
+import { i18n } from "@/utils/i18n"
+import { getTranslatePromptFromConfig } from "@/utils/prompts/translate"
+import { resolveProviderRefForCapability } from "@/utils/providers/provider-registry"
+import { cn } from "@/utils/styles/utils"
+import {
+  selectedProviderIdsAtom,
+  translateRequestAtom,
+  translationCardExpandedStateAtom,
+} from "../atoms"
+
+/**
+ * The button a card's error leads with when Built-in AI refused it: log in for a guest,
+ * upgrade for a spent pool. The server leaves the upgrade off Ultra's refusal, which has
+ * no plan above it, so the card does too. The card has room for the button, so it gets no
+ * dialog.
+ */
+export function getTranslationHubErrorAction(error: unknown): ErrorAction | undefined {
+  switch (getBuiltInAiRefusalKind(error)) {
+    case "logIn":
+      return logInAction()
+    case "upgrade": {
+      const serverAction =
+        typeof error === "object" && error !== null && "action" in error ? error.action : undefined
+      return serverAction
+        ? upgradeAction("extension_quota_exhausted", ANALYTICS_FEATURE.TRANSLATION_HUB)
+        : undefined
+    }
+    default:
+      return undefined
+  }
+}
+
+interface TranslationCardProps {
+  providerId: string
+  isExpanded: boolean
+  onExpandedChange: (expanded: boolean) => void
+}
+
+export function TranslationCard({
+  providerId,
+  isExpanded,
+  onExpandedChange,
+}: TranslationCardProps) {
+  const { theme } = useTheme()
+  const request = useAtomValue(translateRequestAtom)
+  const language = useAtomValue(configFieldsAtomMap.language)
+  const glossary = useAtomValue(configFieldsAtomMap.glossary)
+  const ttsConfig = useAtomValue(configFieldsAtomMap.tts)
+  const providersConfig = useAtomValue(configFieldsAtomMap.providersConfig)
+  const [selectedProviderIds, setSelectedProviderIds] = useAtom(selectedProviderIdsAtom)
+  const setExpandedById = useSetAtom(translationCardExpandedStateAtom)
+  const { play, stop, isFetching, isPlaying } = useTextToSpeech(ANALYTICS_SURFACE.TRANSLATION_HUB)
+
+  const { models: builtInAiModels } = useBuiltInAiModels()
+  const provider = resolveProviderRefForCapability(
+    "pageTranslation",
+    providersConfig,
+    providerId,
+    builtInAiModels,
+  )
+  const providerLogo =
+    provider?.kind === "local" ? PROVIDER_ITEMS[provider.config.provider].logo(theme) : undefined
+
+  // Track request IDs to ignore stale responses from slow providers
+  const requestIdRef = useRef(0)
+  const abortControllerRef = useRef<AbortController | null>(null)
+  const copyButtonRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => () => abortControllerRef.current?.abort(), [])
+
+  const mutation = useMutation({
+    mutationKey: ["translate", providerId],
+    meta: { suppressToast: true },
+    mutationFn: async (req: NonNullable<typeof request>) => {
+      const myRequestId = ++requestIdRef.current
+      abortControllerRef.current?.abort()
+      const abortController = new AbortController()
+      abortControllerRef.current = abortController
+
+      return await trackFeatureAttempt(
+        {
+          ...createFeatureUsageContext(
+            ANALYTICS_FEATURE.TRANSLATION_HUB,
+            ANALYTICS_SURFACE.TRANSLATION_HUB,
+          ),
+          ...classifyResolvedProvider(provider),
+          char_count: req.inputText.length,
+          target_language: req.targetLanguage,
+        },
+        async () => {
+          if (!provider) throw new Error("Provider not found")
+
+          const langConfig = {
+            sourceCode: req.sourceLanguage,
+            targetCode: req.targetLanguage,
+            level: language.level,
+          }
+          const preparedText = prepareTranslationText(req.inputText)
+          const glossaryTerms =
+            provider.kind === "system" || isLLMProviderConfig(provider.config)
+              ? (await resolveGlossaryTerms(preparedText, glossary.enabled, req.targetLanguage))
+                  .terms
+              : []
+          if (abortController.signal.aborted) return undefined
+
+          const promptResolver = async (targetLang: string, input: string) =>
+            getTranslatePromptFromConfig(
+              { customPromptsConfig: req.promptConfig },
+              targetLang,
+              input,
+              { glossaryTerms },
+            )
+
+          let result: string
+          if (provider.kind === "system") {
+            const { systemPrompt, prompt } = await promptResolver(
+              LANGUAGE_ENGLISH_NAMES[req.targetLanguage],
+              preparedText,
+            )
+            const response = await streamBackgroundText(
+              {
+                providerKind: "system",
+                providerId: provider.id,
+                requestId: getRandomUUID(),
+                hostedFeature: "pageTranslation",
+                instructions: systemPrompt,
+                prompt,
+              },
+              { signal: abortController.signal },
+            )
+            result = response.output.trim()
+          } else {
+            result = await executeTranslate(
+              preparedText,
+              langConfig,
+              provider.config,
+              promptResolver,
+              {
+                // Typed newlines are always meaningful, as in input translation.
+                preserveLineBreaks: true,
+                signal: abortController.signal,
+              },
+            )
+          }
+
+          // Ignore stale responses - return undefined to silently discard
+          if (requestIdRef.current !== myRequestId) {
+            return undefined
+          }
+
+          return result
+        },
+      )
+    },
+  })
+
+  const requestTranslation = () => {
+    if (request?.inputText.trim()) {
+      stop()
+      mutation.mutate(request)
+    }
+  }
+
+  // Trigger translation when request changes
+  const triggerTranslation = useEffectEvent(requestTranslation)
+
+  useEffect(() => {
+    triggerTranslation()
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- the dependencies are re-run triggers, not values the effect body reads
+  }, [request?.timestamp])
+
+  const handleCopy = () => {
+    if (mutation.data) {
+      void navigator.clipboard.writeText(mutation.data)
+      if (!copyButtonRef.current) return
+
+      anchoredToastManager.add({
+        data: { tooltipStyle: true },
+        id: `translation-copy-${providerId}`,
+        positionerProps: {
+          anchor: copyButtonRef.current,
+          sideOffset: 6,
+        },
+        title: i18n.t("translationHub.copiedToClipboard"),
+      })
+    }
+  }
+
+  const handleRemove = () => {
+    stop()
+    void setSelectedProviderIds(selectedProviderIds.filter((id) => id !== providerId))
+    setExpandedById((prev) => {
+      if (!(providerId in prev)) return prev
+
+      const next = { ...prev }
+      delete next[providerId]
+      return next
+    })
+  }
+
+  if (!provider) return null
+
+  const hasContent = mutation.isError || (mutation.data !== undefined && mutation.data !== "")
+  const errorAction = mutation.isError ? getTranslationHubErrorAction(mutation.error) : undefined
+  const speechAction = isFetching
+    ? "speak.fetchingAudio"
+    : isPlaying
+      ? "action.playing"
+      : "translationHub.speakTranslation"
+
+  const handleSpeak = () => {
+    if (isFetching || isPlaying) {
+      stop()
+    } else if (mutation.data) {
+      // Use the target language's voice. Detecting the language instead can
+      // mistake European for Brazilian Portuguese, and Cantonese for Mandarin.
+      const targetLanguage = mutation.variables?.targetLanguage
+      void play(
+        mutation.data,
+        ttsConfig,
+        targetLanguage ? { forcedVoice: selectTTSVoice(ttsConfig, targetLanguage) } : undefined,
+      )
+    }
+  }
+
+  return (
+    <div className="rounded-xl border bg-card">
+      <div
+        className={cn(
+          "flex items-center justify-between px-3 py-2",
+          hasContent && isExpanded && "border-b",
+        )}
+      >
+        <div className="flex items-center space-x-2">
+          {provider?.kind === "system" ? (
+            <ModelIcon
+              vendor={findHostedAiModel(builtInAiModels, provider.model)?.vendor}
+              name={provider.name}
+              theme={theme}
+            />
+          ) : providerLogo ? (
+            <ProviderIcon logo={providerLogo} name={provider.name} size="sm" />
+          ) : (
+            <div className="flex h-5 w-5 items-center justify-center rounded bg-muted text-xs text-muted-foreground">
+              ?
+            </div>
+          )}
+        </div>
+        <div className="flex items-center space-x-1">
+          {mutation.isPending && (
+            <Icon icon="tabler:loader-2" className="h-4 w-4 animate-spin text-muted-foreground" />
+          )}
+          {!mutation.isPending && hasContent && (
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={requestTranslation}
+              className="h-7 w-7"
+              title={i18n.t("translationHub.retryTranslation")}
+            >
+              <Icon icon="tabler:refresh" className="h-3.5 w-3.5" />
+            </Button>
+          )}
+          {mutation.data && !mutation.isPending && (
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={handleSpeak}
+              className="h-7 w-7"
+              title={i18n.t(speechAction)}
+              aria-label={i18n.t(speechAction)}
+            >
+              <Icon
+                icon={
+                  isFetching
+                    ? "tabler:loader-2"
+                    : isPlaying
+                      ? "tabler:player-stop-filled"
+                      : "tabler:volume"
+                }
+                className={cn("h-3.5 w-3.5", isFetching && "animate-spin")}
+              />
+            </Button>
+          )}
+          {mutation.data && !mutation.isPending && (
+            <Button
+              ref={copyButtonRef}
+              variant="ghost"
+              size="icon"
+              onClick={handleCopy}
+              className="h-7 w-7"
+              title={i18n.t("translationHub.copyTranslation")}
+            >
+              <Icon icon="tabler:copy" className="h-3.5 w-3.5" />
+            </Button>
+          )}
+          {hasContent && (
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => onExpandedChange(!isExpanded)}
+              className="h-7 w-7"
+              title={i18n.t(
+                isExpanded ? "translationHub.collapseCard" : "translationHub.expandCard",
+              )}
+              aria-label={i18n.t(
+                isExpanded ? "translationHub.collapseCard" : "translationHub.expandCard",
+              )}
+              aria-expanded={isExpanded}
+            >
+              <Icon
+                icon={isExpanded ? "tabler:chevron-up" : "tabler:chevron-down"}
+                className="h-3.5 w-3.5"
+              />
+            </Button>
+          )}
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={handleRemove}
+            className="h-7 w-7"
+            title={i18n.t("translationHub.deleteCard")}
+          >
+            <Icon icon="tabler:x" className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      </div>
+
+      {hasContent && isExpanded && (
+        <div className="p-3">
+          {mutation.isError ? (
+            <div>
+              <div className="mb-1 flex items-center space-x-2 text-destructive">
+                <Icon icon="tabler:alert-circle" className="h-4 w-4" />
+                <span className="text-sm font-medium">
+                  {i18n.t("translationHub.translationFailed")}
+                </span>
+              </div>
+              <p className="text-sm break-words whitespace-pre-wrap text-muted-foreground">
+                {mutation.error instanceof Error
+                  ? mutation.error.message
+                  : i18n.t("translationHub.translationFailedFallback")}
+              </p>
+              {errorAction && (
+                <Button
+                  size="sm"
+                  variant="accent"
+                  className="mt-2"
+                  onClick={() => window.open(errorAction.url, "_blank", "noopener")}
+                >
+                  {errorAction.label}
+                </Button>
+              )}
+            </div>
+          ) : (
+            <div
+              key={mutation.data}
+              className="animate-in text-base leading-relaxed whitespace-pre-wrap duration-300 fade-in"
+            >
+              {mutation.data}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
