@@ -169,14 +169,17 @@ options:
     description: 添加 Read Frog 可以调用的提供商。内置 20 多个，也可以添加兼容 Chat Completions 的自定义 API 和 Open Responses 自定义 API。
     failover:
       title: AI 故障切换与免费备选链
-      description: 主 AI 模型遇到限流 (429)、额度耗尽、超时或网络异常时，自动按顺序切换到其他已就绪的免费 AI 模型；绝不静默降级至传统机器翻译。
+      description: 主 AI 模型遇到限流 (429)、402/额度耗尽、404/模型下线、超时或网络异常时，自动按顺序切换至其他已就绪且零费用的备用 AI 模型；绝不静默切换至付费服务或传统机器翻译。
       primaryBadge: 当前主用
       readyBadge: 已就绪
       missingKeyBadge: 未填写密钥
+      freeTierBadge: 免费层
+      localFreeBadge: 本地零费
+      paidNotAutoBadge: 付费/未认证免切
       enableBackup: 作为备用
       moveUp: 上移
       moveDown: 下移
-      freeTierHint: 推荐免费云端组合：GroqCloud（Llama 3.3 70B）/ Google Gemini（Flash 系列）/ OpenRouter（:free 模型）/ Cerebras / 硅基流动，或接入本地 Ollama。
+      freeTierHint: 推荐免费云端组合：GroqCloud（qwen/qwen3.8-27b，免费 30 RPM / 1K RPD / 8K TPM / 200K TPD）/ Google Gemini（gemini-3.5-flash-lite 免费层）/ OpenRouter（:free 模型，如 google/gemma-4-31b-it:free 或 openrouter/free），或接入本地 Ollama。付费或需绑卡试用的服务不会参与自动故障切换。
       securityBoundaryHint: 安全边界提示：API 密钥保存在浏览器扩展本地存储（chrome.storage.local），不随代码或发行包分发，请勿与服务器端密钥的保密级别混淆。
     configTitle: 提供商配置
     addProvider: 添加提供商

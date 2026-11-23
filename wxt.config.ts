@@ -15,6 +15,12 @@ const WXT_API_KEY_PATTERN = /^WXT_.*API_KEY/
 // entrypoints/content-runtime, the ES module behind every page's content scripts
 const CONTENT_RUNTIME_NAME = "content-runtime"
 const ALLOWED_BUNDLED_API_KEYS = new Set(["WXT_POSTHOG_API_KEY"])
+// Dedicated SPKI RSA-2048 public key for Smart Read Frog (private edition).
+// Pins deterministic Chromium Extension ID: `fbjkcfaokdnppjoanibkkplgbloeooih`
+// (guaranteed distinct from official Read Frog `modkelfkcfjpgbfmnbnllalkiogfofhb`),
+// preserving local settings, API keys, and caches across upgrades and path changes.
+const SMART_READ_FROG_MANIFEST_KEY =
+  "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0xrKU1XPAQjciXYxHtIE19u+BDC4qwjDPpp3ZXbX1KCWFMjKejEJVmbvbkWVgHpK8lCawS4ITwzmd4wx452i2axLMgWI4JChtsMhidvHFZlHvyVGZqQNwtnVoqrRR6371x3fuoHiPhcqu/l3oJK21nyFzxIwKQ3dGKQKaF4y1A3wuhhK6b1sxcNd/lKcn5ubgxYy0TwIhspmsbMohHvorD463cDEf0fdH8QL1FeaQQ4Jt9Tx1f5VxrDX9zEDvhJeSKd//Qc3KFWnq+95GeRM2Dy3ZS/xxCt3eXemBk5q0VqiR8RCMYeAs0xYaI/CDVDU9p6d8mu8KDUTMZQBjYwS5QIDAQAB"
 const useLocalPackages = isLocalPackagesEnabled(process.env)
 // Private edition defaults to skipping official telemetry / OAuth env validation unless explicitly requested.
 const shouldSkipEnvValidation = process.env.WXT_REQUIRE_OFFICIAL_TELEMETRY !== "true"
@@ -42,11 +48,12 @@ export default defineConfig({
   manifest: ({ browser }) => ({
     name: "__MSG_extName__",
     description: "__MSG_extDescription__",
-    version: "1.61.1.1",
-    version_name: "1.61.1-smart.1",
+    version: "1.61.1.2",
+    version_name: "1.61.1-smart.2",
     default_locale: "en",
-    // Private edition omits the upstream hardcoded dev `key` so Chromium assigns
-    // an independent extension ID that coexists cleanly alongside official Read Frog.
+    // Pin a dedicated public key on Chromium builds so unpacked/ZIP upgrades keep
+    // Extension ID `fbjkcfaokdnppjoanibkkplgbloeooih` without colliding with official Read Frog.
+    ...(browser !== "firefox" && { key: SMART_READ_FROG_MANIFEST_KEY }),
     permissions: [
       "storage",
       // The glossary is the only user-authored, non-regenerable data the
@@ -94,7 +101,7 @@ export default defineConfig({
       },
       browser_specific_settings: {
         gecko: {
-          id: "{bd311a81-4530-4fcc-9178-74006155461b}",
+          id: "smart-read-frog@private.local",
           strict_min_version: "140.0",
           data_collection_permissions: {
             required: ["none"],

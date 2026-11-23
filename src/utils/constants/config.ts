@@ -82,7 +82,6 @@ export const DEFAULT_AI_PROVIDER_ID = DEFAULT_PROVIDER_CONFIG.groq.id
 export const DEFAULT_FALLBACK_AI_PROVIDER_IDS = [
   DEFAULT_PROVIDER_CONFIG.google.id,
   DEFAULT_PROVIDER_CONFIG.openrouter.id,
-  DEFAULT_PROVIDER_CONFIG.cerebras.id,
 ]
 
 export const DEFAULT_FLOATING_BUTTON_POSITION = 0.66
@@ -369,9 +368,10 @@ export const DEFAULT_CONFIG: Config = {
 }
 
 /**
- * A fresh install defaults to AI LLM providers (Groq primary with Gemini / OpenRouter / Cerebras
- * fallbacks), targeting Simplified Chinese (`zh-Hans`) with smart auto-translation enabled.
- * Never uses traditional machine translation as default or fallback.
+ * A fresh install defaults to verified zero-cost AI LLM providers: Groq (`qwen/qwen3.8-27b`)
+ * primary with Gemini (`gemini-3.5-flash-lite`) and OpenRouter (`:free`) fallbacks,
+ * targeting Simplified Chinese (`zh-Hans`) with smart auto-translation enabled.
+ * Never uses traditional machine translation or paid services as default or fallback.
  */
 export function buildFreshDefaultConfig(): Config {
   return {

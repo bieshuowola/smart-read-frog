@@ -72,14 +72,16 @@ describe("dEFAULT_CONFIG", () => {
       "groq-default",
       "google-default",
       "openrouter-default",
-      "cerebras-default",
-      "siliconflow-default",
-      "openai-compatible-default",
       "ollama-default",
+      "openai-compatible-default",
       "deepseek-default",
       "openai-default",
     ])
     expect(DEFAULT_CONFIG.pageTranslation.providerId).toBe("groq-default")
+    expect(DEFAULT_CONFIG.pageTranslation.fallbackProviderIds).toEqual([
+      "google-default",
+      "openrouter-default",
+    ])
     expect(DEFAULT_CONFIG.selectionToolbar.features.translate.providerId).toBe(
       "groq-default",
     )
@@ -90,9 +92,12 @@ describe("dEFAULT_CONFIG", () => {
     ).toEqual(
       expect.objectContaining({
         model: {
-          model: "llama-3.3-70b-versatile",
+          model: "qwen/qwen3.8-27b",
           isCustomModel: false,
           customModel: null,
+        },
+        providerOptions: {
+          reasoningEffort: "none",
         },
       }),
     )

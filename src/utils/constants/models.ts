@@ -263,9 +263,11 @@ export const LLM_PROVIDER_MODELS = {
     "openai.gpt-oss-120b",
   ],
   groq: [
-    "openai/gpt-oss-20b",
-    "openai/gpt-oss-120b",
+    // Verified active on Groq Free Plan (no credit card required, as of 2026-11).
     "qwen/qwen3.8-27b",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    // Legacy / Enterprise / deprecated IDs kept below for persisted-config schema compatibility.
     "qwen/qwen3.6-27b",
     "gemma2-9b-it",
     "llama-3.1-8b-instant",
@@ -409,13 +411,15 @@ export const LLM_PROVIDER_MODELS = {
   perplexity: ["perplexity/sonar", "fast", "low", "medium", "high", "xhigh"],
   openrouter: [
     "google/gemma-4-31b-it:free",
+    "openrouter/free",
+    "google/gemma-4-26b-a4b-it:free",
     "openai/gpt-5.6-luna",
     "google/gemini-3.5-flash-lite",
     "deepseek/deepseek-v4-flash",
     "x-ai/grok-4-fast:free",
     "openai/gpt-4.1-mini",
   ],
-  ollama: ["gemma4:e2b", "gemma4:e4b", "gemma3:4b", "llama3.2:3b"],
+  ollama: ["gemma4:e2b", "gemma4:e4b", "gemma3:4b", "llama3.2:3b", "qwen2.5:3b", "qwen2.5:7b", "qwen3:8b"],
   volcengine: [
     "doubao-seed-1-6-flash-250828",
     "doubao-seed-1-6-lite-251015",

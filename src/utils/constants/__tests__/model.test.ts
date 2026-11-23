@@ -183,6 +183,9 @@ describe("getProviderOptions", () => {
         "gemma4:e4b",
         "gemma3:4b",
         "llama3.2:3b",
+        "qwen2.5:3b",
+        "qwen2.5:7b",
+        "qwen3:8b",
       ])
     })
 

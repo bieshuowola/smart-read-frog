@@ -169,14 +169,17 @@ options:
     description: Add the providers Read Frog can call. Over 20 are built in, with custom support for Chat Completions-compatible and Open Responses APIs.
     failover:
       title: AI Failover & Free Backup Chain
-      description: Automatically fail over across ready LLM providers on HTTP 429 rate-limits, quota exhaustion, timeouts, or network errors—never silently falling back to traditional machine translation.
+      description: Automatically fail over across ready zero-cost LLM providers on HTTP 429 rate-limits, 402/quota exhaustion, 404/model retirement, timeouts, or network errors—never silently falling back to paid tiers or traditional machine translation.
       primaryBadge: Primary
       readyBadge: Ready
       missingKeyBadge: No key
+      freeTierBadge: Free tier
+      localFreeBadge: Local free
+      paidNotAutoBadge: Paid / Excluded
       enableBackup: Enable backup
       moveUp: Move up
       moveDown: Move down
-      freeTierHint: Recommended free tiers include GroqCloud (Llama 3.3 70B), Google Gemini (Flash), OpenRouter (:free models), Cerebras, SiliconFlow, or local Ollama.
+      freeTierHint: Verified free tiers include GroqCloud (qwen/qwen3.8-27b, free 30 RPM / 1K RPD / 8K TPM / 200K TPD), Google Gemini (gemini-3.5-flash-lite free tier), OpenRouter (:free models such as google/gemma-4-31b-it:free or openrouter/free), or local Ollama. Paid or credit-card-trial services are excluded from automatic failover.
       securityBoundaryHint: "Security boundary: API keys live in browser-local extension storage (chrome.storage.local), never bundled in source or release zips, and do not have server-side secret isolation."
     configTitle: Provider config
     addProvider: Add provider

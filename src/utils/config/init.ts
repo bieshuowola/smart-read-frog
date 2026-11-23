@@ -5,6 +5,7 @@ import { configSchema } from "@/types/config/config"
 import { isAPIProviderConfig } from "@/types/config/provider"
 import { initI18n } from "@/utils/i18n"
 import { createLogger } from "@/utils/logging/logger"
+import { repairDeprecatedFreeDefaults } from "@/utils/smart-translate/config-upgrade"
 import {
   buildFreshDefaultConfig,
   CONFIG_SCHEMA_VERSION,
@@ -68,6 +69,9 @@ export async function initializeConfig(): Promise<InitializeConfigResult> {
     // Stored as every reader gets it: defaults filled in, the selection
     // toolbar's order and pins in step with its actions.
     config = parsedConfig.data
+    const upgradeResult = repairDeprecatedFreeDefaults(config)
+    config = upgradeResult.config
+    didConfigChange = didConfigChange || upgradeResult.changed
   } else {
     log.warn("Config is invalid, using default config")
     await initI18n(DEFAULT_CONFIG.uiLanguage)

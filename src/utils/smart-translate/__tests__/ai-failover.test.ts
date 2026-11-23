@@ -2,13 +2,16 @@ import type { Config } from "@/types/config/config"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { DEFAULT_CONFIG } from "@/utils/constants/config"
 import { DEFAULT_PROVIDER_CONFIG } from "@/utils/constants/providers"
+import { getRequestErrorMeta } from "@/utils/request/retry-policy"
 import {
   AllAIProvidersFailedError,
   buildLLMFailoverChain,
   clearProviderCooldowns,
   executeTranslateWithFailover,
+  getProviderBillingTier,
   getProviderCooldown,
   isProviderReadyForFailover,
+  isZeroCostFailoverProvider,
 } from "../ai-failover"
 
 const executeTranslateMock = vi.fn<(...args: any[]) => Promise<string>>()
@@ -151,5 +154,166 @@ describe("ai-failover", () => {
       "gemini-backup",
       "openrouter-backup",
     ])
+  })
+
+  it("classifies verified free tiers vs local free vs paid/enterprise/trial providers accurately", () => {
+    expect(getProviderBillingTier(DEFAULT_PROVIDER_CONFIG.groq)).toBe("free-tier")
+    expect(
+      getProviderBillingTier({
+        ...structuredClone(DEFAULT_PROVIDER_CONFIG.groq),
+        model: { model: "llama-3.3-70b-versatile", isCustomModel: false, customModel: null },
+      }),
+    ).toBe("paid-or-unknown")
+
+    expect(getProviderBillingTier(DEFAULT_PROVIDER_CONFIG.google)).toBe("free-tier")
+    expect(getProviderBillingTier(DEFAULT_PROVIDER_CONFIG.openrouter)).toBe("free-tier")
+    expect(
+      getProviderBillingTier({
+        ...structuredClone(DEFAULT_PROVIDER_CONFIG.openrouter),
+        model: { model: "openrouter/free", isCustomModel: false, customModel: null },
+      }),
+    ).toBe("free-tier")
+    expect(
+      getProviderBillingTier({
+        ...structuredClone(DEFAULT_PROVIDER_CONFIG.openrouter),
+        model: { model: "openai/gpt-5.6-luna", isCustomModel: false, customModel: null },
+      }),
+    ).toBe("paid-or-unknown")
+
+    expect(getProviderBillingTier(DEFAULT_PROVIDER_CONFIG.cerebras)).toBe("paid-or-unknown")
+    expect(getProviderBillingTier(DEFAULT_PROVIDER_CONFIG.openai)).toBe("paid-or-unknown")
+    expect(getProviderBillingTier(DEFAULT_PROVIDER_CONFIG.deepseek)).toBe("paid-or-unknown")
+    expect(getProviderBillingTier(DEFAULT_PROVIDER_CONFIG.siliconflow)).toBe("paid-or-unknown")
+
+    expect(getProviderBillingTier(DEFAULT_PROVIDER_CONFIG.ollama)).toBe("local-free")
+    expect(
+      getProviderBillingTier({
+        ...structuredClone(DEFAULT_PROVIDER_CONFIG["openai-compatible"]),
+        baseURL: "http://127.0.0.1:11434/v1",
+      }),
+    ).toBe("local-free")
+    expect(isZeroCostFailoverProvider(DEFAULT_PROVIDER_CONFIG.groq)).toBe(true)
+    expect(isZeroCostFailoverProvider(DEFAULT_PROVIDER_CONFIG.cerebras)).toBe(false)
+    expect(isZeroCostFailoverProvider(DEFAULT_PROVIDER_CONFIG["google-translate"])).toBe(false)
+  })
+
+  it("excludes configured paid providers and non-free models from automatic failover chain", () => {
+    const cfg = createTestConfig()
+    cfg.providersConfig.push(
+      {
+        ...structuredClone(DEFAULT_PROVIDER_CONFIG.openai),
+        id: "openai-paid-keyed",
+        apiKey: "sk-paid-do-not-auto-charge",
+      },
+      {
+        ...structuredClone(DEFAULT_PROVIDER_CONFIG.deepseek),
+        id: "deepseek-paid-keyed",
+        apiKey: "sk-ds-paid-do-not-auto-charge",
+      },
+      {
+        ...structuredClone(DEFAULT_PROVIDER_CONFIG.cerebras),
+        id: "cerebras-trial-keyed",
+        apiKey: "csk-trial-do-not-auto-use",
+      },
+      {
+        ...structuredClone(DEFAULT_PROVIDER_CONFIG.openrouter),
+        id: "openrouter-paid-model",
+        apiKey: "sk-or-paid-model",
+        model: { model: "openai/gpt-5.6-luna", isCustomModel: false, customModel: null },
+      },
+    )
+    cfg.pageTranslation.fallbackProviderIds = [
+      "openai-paid-keyed",
+      "deepseek-paid-keyed",
+      "cerebras-trial-keyed",
+      "openrouter-paid-model",
+      "gemini-backup",
+      "google-translate-default",
+    ]
+
+    const primary = cfg.providersConfig.find((p) => p.id === "groq-primary")!
+    const chain = buildLLMFailoverChain(primary, cfg)
+
+    expect(chain.map((p) => p.id)).toEqual(["groq-primary", "gemini-backup"])
+  })
+
+  it("fails over cleanly on HTTP 404 model_not_found, HTTP 400 decommissioned, and HTTP 402 insufficient credits", async () => {
+    const cfg = createTestConfig()
+    const primary = cfg.providersConfig.find((p) => p.id === "groq-primary")!
+    const switched: Array<{ from: string; to: string; reason: string }> = []
+
+    const err404 = Object.assign(new Error("The model does not exist"), { statusCode: 404 })
+    const err400Decommissioned = Object.assign(
+      new Error("model_decommissioned: llama-3.3-70b-versatile is no longer available on the free tier"),
+      { statusCode: 400 },
+    )
+    executeTranslateMock
+      .mockRejectedValueOnce(err404)
+      .mockRejectedValueOnce(err400Decommissioned)
+      .mockResolvedValueOnce("OpenRouter 免费备用译文")
+
+    const result = await executeTranslateWithFailover(
+      "Deprecated model failover",
+      cfg.language,
+      primary,
+      cfg,
+      async () => ({ systemPrompt: "sys", prompt: "user" }),
+      {
+        onProviderSwitch: (from, to, reason) => switched.push({ from, to, reason }),
+      },
+    )
+
+    expect(result).toBe("OpenRouter 免费备用译文")
+    expect(switched).toEqual([
+      { from: "groq-primary", to: "gemini-backup", reason: "model_unavailable" },
+      { from: "gemini-backup", to: "openrouter-backup", reason: "model_unavailable" },
+    ])
+
+    clearProviderCooldowns()
+    executeTranslateMock.mockReset()
+    executeTranslateMock
+      .mockRejectedValueOnce(Object.assign(new Error("Payment Required: insufficient credits"), { statusCode: 402 }))
+      .mockResolvedValueOnce("Gemini 备用译文")
+
+    const result402 = await executeTranslateWithFailover(
+      "Billing block failover",
+      cfg.language,
+      primary,
+      cfg,
+      async () => ({ systemPrompt: "sys", prompt: "user" }),
+    )
+    expect(result402).toBe("Gemini 备用译文")
+    expect(getProviderCooldown("groq-primary")?.reason).toBe("billing_or_quota_blocked")
+  })
+
+  it("marks AllAIProvidersFailedError non-retryable access-denied when all candidates fail fatally", async () => {
+    const cfg = createTestConfig()
+    const primary = cfg.providersConfig.find((p) => p.id === "groq-primary")!
+
+    executeTranslateMock
+      .mockRejectedValueOnce(Object.assign(new Error("Invalid API key"), { statusCode: 401 }))
+      .mockRejectedValueOnce(Object.assign(new Error("Model not found"), { statusCode: 404 }))
+      .mockRejectedValueOnce(Object.assign(new Error("Insufficient credits"), { statusCode: 402 }))
+
+    let thrown: unknown
+    try {
+      await executeTranslateWithFailover(
+        "All fatal",
+        cfg.language,
+        primary,
+        cfg,
+        async () => ({ systemPrompt: "sys", prompt: "user" }),
+      )
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(thrown).toBeInstanceOf(AllAIProvidersFailedError)
+    expect(getRequestErrorMeta(thrown)).toEqual(
+      expect.objectContaining({
+        kind: "access-denied",
+        isRetryable: false,
+      }),
+    )
   })
 })

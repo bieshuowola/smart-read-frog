@@ -4,9 +4,95 @@ import type { PromptResolver } from "@/utils/host/translate/api/ai"
 import { isLLMProviderConfig } from "@/types/config/provider"
 import { executeTranslate } from "@/utils/host/translate/execute-translate"
 import { createLogger } from "@/utils/logging/logger"
-import { getRequestErrorMeta } from "@/utils/request/retry-policy"
+import { resolveModelId } from "@/utils/providers/model-id"
+import { attachRequestErrorMeta, getRequestErrorMeta } from "@/utils/request/retry-policy"
 
 const log = createLogger("smart-translate/ai-failover")
+
+export type ProviderBillingTier = "free-tier" | "local-free" | "paid-or-unknown"
+
+// Verified standing zero-cost cloud models (no credit card / no billing account auto-charge).
+const GROQ_FREE_TEXT_MODELS = new Set([
+  "qwen/qwen3.8-27b",
+  "openai/gpt-oss-120b",
+  "openai/gpt-oss-20b",
+])
+
+const GEMINI_FREE_TEXT_MODELS = new Set([
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite",
+  "gemini-3.8-flash",
+  "gemini-3.6-flash",
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-lite",
+  "gemini-flash-lite-latest",
+  "gemini-flash-latest",
+])
+
+const NON_TRANSIENT_FAILOVER_REASONS = new Set([
+  "auth_or_access_denied",
+  "model_unavailable",
+  "billing_or_quota_blocked",
+  "quota_exhausted",
+])
+
+function isLoopbackEndpointUrl(rawUrl: string | undefined): boolean {
+  if (!rawUrl?.trim()) return false
+  try {
+    const { hostname } = new URL(rawUrl.trim())
+    const normalized = hostname.toLowerCase()
+    return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "[::1]" || normalized === "::1"
+  } catch {
+    return false
+  }
+}
+
+export function getProviderBillingTier(provider: LLMProviderConfig): ProviderBillingTier {
+  if (provider.provider === "ollama") {
+    return "local-free"
+  }
+
+  const endpointUrl = "baseURL" in provider ? provider.baseURL : "url" in provider ? provider.url : undefined
+  if (
+    (provider.provider === "openai-compatible" || provider.provider === "open-responses") &&
+    isLoopbackEndpointUrl(endpointUrl)
+  ) {
+    return "local-free"
+  }
+
+  const modelId = resolveModelId(provider.model) ?? ""
+
+  if (provider.provider === "groq") {
+    if (isLoopbackEndpointUrl(endpointUrl)) {
+      return "local-free"
+    }
+    return GROQ_FREE_TEXT_MODELS.has(modelId) ? "free-tier" : "paid-or-unknown"
+  }
+
+  if (provider.provider === "google") {
+    if (isLoopbackEndpointUrl(endpointUrl)) {
+      return "local-free"
+    }
+    return GEMINI_FREE_TEXT_MODELS.has(modelId) ? "free-tier" : "paid-or-unknown"
+  }
+
+  if (provider.provider === "openrouter") {
+    if (isLoopbackEndpointUrl(endpointUrl)) {
+      return "local-free"
+    }
+    return modelId === "openrouter/free" || modelId.endsWith(":free")
+      ? "free-tier"
+      : "paid-or-unknown"
+  }
+
+  return "paid-or-unknown"
+}
+
+export function isZeroCostFailoverProvider(
+  provider: ProviderConfig,
+): provider is LLMProviderConfig {
+  return isLLMProviderConfig(provider) && getProviderBillingTier(provider) !== "paid-or-unknown"
+}
 
 export interface FailoverCooldownRecord {
   until: number
@@ -56,12 +142,16 @@ export function isProviderReadyForFailover(provider: ProviderConfig): provider i
 
 export function hasAnyConfiguredLLMProvider(config: Config): boolean {
   const primaryId = config.pageTranslation.providerId
-  const fallbackIds = config.pageTranslation.fallbackProviderIds ?? []
-  const orderedIds = [primaryId, ...fallbackIds]
+  const primaryProvider = config.providersConfig.find((p) => p.id === primaryId)
+  if (primaryProvider && isProviderReadyForFailover(primaryProvider)) {
+    return true
+  }
 
-  for (const id of orderedIds) {
+  const fallbackIds = config.pageTranslation.fallbackProviderIds ?? []
+  for (const id of fallbackIds) {
+    if (id === primaryId) continue
     const found = config.providersConfig.find((p) => p.id === id)
-    if (found && isProviderReadyForFailover(found)) {
+    if (found && isProviderReadyForFailover(found) && isZeroCostFailoverProvider(found)) {
       return true
     }
   }
@@ -70,7 +160,8 @@ export function hasAnyConfiguredLLMProvider(config: Config): boolean {
 
 /**
  * Build ordered, deduplicated list of eligible LLM candidates for failover.
- * Strictly enforces AI-only translation: NEVER includes Google/Microsoft Translate or DeepL/DeepLX.
+ * Strictly enforces AI-only translation: NEVER includes Google/Microsoft Translate, DeepL/DeepLX,
+ * or paid/unverified cloud models in the automatic fallback chain.
  */
 export function buildLLMFailoverChain(
   primaryProvider: ProviderConfig,
@@ -84,32 +175,37 @@ export function buildLLMFailoverChain(
   const allCandidates: LLMProviderConfig[] = []
   const seenIds = new Set<string>()
 
-  const addIfEligible = (provider: ProviderConfig | undefined, requireReady: boolean) => {
+  const addIfEligible = (
+    provider: ProviderConfig | undefined,
+    requireReady: boolean,
+    requireZeroCostFallback: boolean,
+  ) => {
     if (!provider || seenIds.has(provider.id)) return
     if (!isLLMProviderConfig(provider) || !provider.enabled) return
     if (requireReady && !isProviderReadyForFailover(provider)) return
+    if (requireZeroCostFallback && !isZeroCostFailoverProvider(provider)) return
     seenIds.add(provider.id)
     allCandidates.push(provider)
   }
 
   // Primary can be tried even if requireReady is false, EXCEPT when primary is missing credentials
-  // and at least one ready fallback provider already exists — in that case skip straight to ready ones.
+  // and at least one ready zero-cost fallback provider already exists — in that case skip straight to ready ones.
   const hasReadyFallback =
     config?.pageTranslation.fallbackProviderIds?.some((id) => {
       if (id === primaryProvider.id) return false
       const found = config.providersConfig.find((p) => p.id === id)
-      return found ? isProviderReadyForFailover(found) : false
+      return found ? isProviderReadyForFailover(found) && isZeroCostFailoverProvider(found) : false
     }) ?? false
 
   if (isProviderReadyForFailover(primaryProvider) || !hasReadyFallback) {
-    addIfEligible(primaryProvider, false)
+    addIfEligible(primaryProvider, false, false)
   }
 
   if (config) {
     const fallbackIds = config.pageTranslation.fallbackProviderIds ?? []
     for (const fallbackId of fallbackIds) {
       const candidate = config.providersConfig.find((p) => p.id === fallbackId)
-      addIfEligible(candidate, true)
+      addIfEligible(candidate, true, true)
     }
   }
 
@@ -135,16 +231,32 @@ export function classifyFailoverError(error: unknown): {
   const meta = getRequestErrorMeta(error)
   const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase()
 
+  if (meta.statusCode === 402 || /payment required|insufficient[_ ]credits?/i.test(message)) {
+    return {
+      shouldFailover: true,
+      cooldownMs: AUTH_OR_QUOTA_COOLDOWN_MS,
+      reason: "billing_or_quota_blocked",
+    }
+  }
+
   if (
     meta.statusCode === 429 ||
     meta.kind === "rate-limit" ||
     /429|rate[ -]?limit|too many requests|quota|exhausted|insufficient_quota|credit/.test(message)
   ) {
-    const isQuotaExhausted = /quota|exhausted|insufficient_quota|billing|credit/.test(message)
+    const isQuotaExhausted = /quota|exhausted|insufficient_quota|credit/.test(message)
     return {
       shouldFailover: true,
       cooldownMs: isQuotaExhausted ? AUTH_OR_QUOTA_COOLDOWN_MS : RATE_LIMIT_COOLDOWN_MS,
       reason: isQuotaExhausted ? "quota_exhausted" : "rate_limit",
+    }
+  }
+
+  if (/billing/i.test(message)) {
+    return {
+      shouldFailover: true,
+      cooldownMs: AUTH_OR_QUOTA_COOLDOWN_MS,
+      reason: "billing_or_quota_blocked",
     }
   }
 
@@ -164,7 +276,16 @@ export function classifyFailoverError(error: unknown): {
     }
   }
 
-  if (meta.statusCode === 404 || /model.*not found|does not exist|decommissioned/.test(message)) {
+  if (
+    meta.statusCode === 404 ||
+    (meta.statusCode === 400 &&
+      /model|decommissioned|deprecated|retired|not supported|not available|free tier|no access|invalid_request_error/i.test(
+        message,
+      )) ||
+    /model.*not found|does not exist|decommissioned|not available on the free tier|no access to model|model.*deprecated|model.*retired/.test(
+      message,
+    )
+  ) {
     return {
       shouldFailover: true,
       cooldownMs: AUTH_OR_QUOTA_COOLDOWN_MS,
@@ -224,7 +345,7 @@ export async function executeTranslateWithFailover<TContext>(
     return executeTranslate(text, langConfig, primaryProvider, promptResolver, options)
   }
 
-  const attempts: Array<{ providerId: string; provider: string; error: unknown }> = []
+  const attempts: Array<{ providerId: string; provider: string; reason: string; error: unknown }> = []
   let lastError: unknown
 
   for (let i = 0; i < candidates.length; i++) {
@@ -237,9 +358,14 @@ export async function executeTranslateWithFailover<TContext>(
       return await executeTranslate(text, langConfig, candidate, promptResolver, options)
     } catch (error) {
       lastError = error
-      attempts.push({ providerId: candidate.id, provider: candidate.provider, error })
-
       const classification = classifyFailoverError(error)
+      attempts.push({
+        providerId: candidate.id,
+        provider: candidate.provider,
+        reason: classification.reason,
+        error,
+      })
+
       if (!classification.shouldFailover) {
         throw error
       }
@@ -265,10 +391,17 @@ export async function executeTranslateWithFailover<TContext>(
 
   if (attempts.length > 1) {
     const lastMessage = lastError instanceof Error ? lastError.message : String(lastError)
-    throw new AllAIProvidersFailedError(
+    const allNonTransient = attempts.every((attempt) =>
+      NON_TRANSIENT_FAILOVER_REASONS.has(attempt.reason),
+    )
+    const aggregatedError = new AllAIProvidersFailedError(
       `All configured AI providers failed (${attempts.map((a) => a.providerId).join(" -> ")}): ${lastMessage}`,
-      attempts,
+      attempts.map(({ providerId, provider, error }) => ({ providerId, provider, error })),
       lastError,
+    )
+    throw attachRequestErrorMeta(
+      aggregatedError,
+      allNonTransient ? { kind: "access-denied", isRetryable: false } : getRequestErrorMeta(lastError),
     )
   }
 

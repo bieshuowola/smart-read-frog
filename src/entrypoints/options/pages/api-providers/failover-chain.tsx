@@ -7,7 +7,11 @@ import { Switch } from "@/components/ui/base-ui/switch"
 import { configAtom, configFieldsAtomMap } from "@/utils/atoms/config"
 import { getLLMProvidersConfig } from "@/utils/config/helpers"
 import { i18n } from "@/utils/i18n"
-import { isProviderReadyForFailover } from "@/utils/smart-translate/ai-failover"
+import {
+  getProviderBillingTier,
+  isProviderReadyForFailover,
+  isZeroCostFailoverProvider,
+} from "@/utils/smart-translate/ai-failover"
 import { ConfigItem } from "../../components/config-item"
 import { ConfigSection } from "../../components/config-section"
 
@@ -101,10 +105,19 @@ export function FailoverChainConfig() {
 
       <div className="flex flex-col gap-2">
         {backupCandidates.map((provider) => {
-          const isSelected = fallbackIds.includes(provider.id)
+          const zeroCostEligible = isZeroCostFailoverProvider(provider)
+          const billingTier = getProviderBillingTier(provider)
+          const isSelected = zeroCostEligible && fallbackIds.includes(provider.id)
           const activeIndex = fallbackIds.filter((id) => id !== primaryId).indexOf(provider.id)
           const totalActive = fallbackIds.filter((id) => id !== primaryId).length
           const ready = isProviderReadyForFailover(provider)
+
+          const tierBadgeLabel =
+            billingTier === "free-tier"
+              ? i18n.t("options.apiProviders.failover.freeTierBadge")
+              : billingTier === "local-free"
+                ? i18n.t("options.apiProviders.failover.localFreeBadge")
+                : i18n.t("options.apiProviders.failover.paidNotAutoBadge")
 
           return (
             <div
@@ -125,6 +138,16 @@ export function FailoverChainConfig() {
                     {ready
                       ? i18n.t("options.apiProviders.failover.readyBadge")
                       : i18n.t("options.apiProviders.failover.missingKeyBadge")}
+                  </Badge>
+                  <Badge
+                    variant="outline"
+                    className={
+                      zeroCostEligible
+                        ? "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300"
+                        : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                    }
+                  >
+                    {tierBadgeLabel}
                   </Badge>
                 </div>
                 <span className="text-muted-foreground truncate text-xs">
@@ -161,6 +184,7 @@ export function FailoverChainConfig() {
                 )}
                 <Switch
                   checked={isSelected}
+                  disabled={!zeroCostEligible}
                   onCheckedChange={(checked) => toggleFallback(provider.id, checked)}
                 />
               </div>

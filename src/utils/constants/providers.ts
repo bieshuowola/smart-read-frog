@@ -103,7 +103,7 @@ export const DEFAULT_LLM_PROVIDER_MODELS: LLMProviderModels = {
     customModel: null,
   },
   groq: {
-    model: "llama-3.3-70b-versatile",
+    model: "qwen/qwen3.8-27b",
     isCustomModel: false,
     customModel: null,
   },
@@ -560,6 +560,12 @@ export const DEFAULT_PROVIDER_CONFIG = {
     provider: "groq",
     model: DEFAULT_LLM_PROVIDER_MODELS.groq,
     reasoning: "none",
+    // `@ai-sdk/groq` 4.0.82 skips top-level `reasoning: "none"` for `qwen/qwen3.8-27b`,
+    // whereas `providerOptions.reasoningEffort: "none"` sends exact `"reasoning_effort": "none"`
+    // so translation uses zero reasoning tokens and emits no `<think>` reasoning block.
+    providerOptions: {
+      reasoningEffort: "none",
+    },
   },
   deepinfra: {
     id: "deepinfra-default",
@@ -738,10 +744,8 @@ export const DEFAULT_PROVIDER_CONFIG_LIST: ProvidersConfig = [
   DEFAULT_PROVIDER_CONFIG.groq,
   DEFAULT_PROVIDER_CONFIG.google,
   DEFAULT_PROVIDER_CONFIG.openrouter,
-  DEFAULT_PROVIDER_CONFIG.cerebras,
-  DEFAULT_PROVIDER_CONFIG.siliconflow,
-  DEFAULT_PROVIDER_CONFIG["openai-compatible"],
   DEFAULT_PROVIDER_CONFIG.ollama,
+  DEFAULT_PROVIDER_CONFIG["openai-compatible"],
   DEFAULT_PROVIDER_CONFIG.deepseek,
   DEFAULT_PROVIDER_CONFIG.openai,
 ]
