@@ -14,6 +14,17 @@ export class BatchCountMismatchError extends Error {
   }
 }
 
+/**
+ * Thrown by a batch executor that isolated individual member outcomes via
+ * bisection so healthy members resolve immediately without retrying them all.
+ */
+export class PartialBatchOutcomesError<R> extends Error {
+  constructor(public readonly outcomes: Array<PromiseSettledResult<R>>) {
+    super("Batch completed with partial item failures")
+    this.name = "PartialBatchOutcomesError"
+  }
+}
+
 const BASE_BACKOFF_DELAY_MS = 1000
 const MAX_BACKOFF_DELAY_MS = 8000
 // While the dispatch gate reports no free slot, re-poll it at least this often
@@ -374,6 +385,23 @@ export class BatchQueue<T, R> {
 
       tasks.forEach((task, index) => task.resolve(results[index]!))
     } catch (error) {
+      if (error instanceof PartialBatchOutcomesError) {
+        error.outcomes.forEach((outcome, index) => {
+          const task = tasks[index]
+          if (!task) return
+          if (outcome.status === "fulfilled") {
+            task.resolve(outcome.value as R)
+          } else {
+            const reason =
+              outcome.reason instanceof Error
+                ? outcome.reason
+                : new Error(String(outcome.reason))
+            task.reject(reason)
+          }
+        })
+        return
+      }
+
       const err = error as Error
 
       this.onError?.(err, { batchKey, retryCount, isFallback: false })

@@ -11,7 +11,11 @@ import {
 import { isHTMLElement, isNaturalBlockTransNode, isNaturalInlineTransNode } from "../../dom/filter"
 import { getOwnerDocument } from "../../dom/node"
 import { decorateTranslationNode } from "../ui/decorate-translation"
-import { isForceInlineTranslation, isShortInlineTranslationText } from "../ui/translation-utils"
+import {
+  isCompactBlockLayoutContext,
+  isForceInlineTranslation,
+  isShortInlineTranslationText,
+} from "../ui/translation-utils"
 
 interface TranslationInsertionContext {
   layoutSource: TransNode
@@ -214,6 +218,13 @@ export async function insertTranslatedNodeIntoWrapper(
     Number.parseFloat(window.getComputedStyle(translatedNode).lineHeight) === 0
   ) {
     translatedNode.style.lineHeight = "normal"
+  }
+
+  if (
+    translatedNode.classList.contains(BLOCK_CONTENT_CLASS) &&
+    isCompactBlockLayoutContext(layoutSource)
+  ) {
+    translatedNode.dataset.readFrogCompactBlock = "true"
   }
 
   if (

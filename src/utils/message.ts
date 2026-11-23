@@ -36,6 +36,13 @@ import type { TabSmartDecisionState } from "@/utils/smart-translate/types"
 import type { PageAutoDecision } from "@/utils/smart-translate/types"
 import { defineExtensionMessaging } from "@webext-core/messaging"
 
+export interface PageTranslationDiagnostics {
+  isActive: boolean
+  failedCount: number
+  inFlightCount: number
+  lastErrorMessage: string | null
+}
+
 interface ProtocolMap {
   // navigation
   openPage: (data: { url: string; active?: boolean }) => void
@@ -118,6 +125,13 @@ interface ProtocolMap {
   selectionToolbarHiddenUntilReload: () => void
   // popup → the tab's top frame: open or close the "Diagnose this page" panel
   togglePageTranslationDiagnostics: () => void
+  // popup / diagnostics ↔ active tab: failure summary & targeted retry
+  getPageTranslationDiagnostics: (data?: {
+    tabId?: number
+  }) => Promise<PageTranslationDiagnostics | null>
+  getPageTranslationDiagnosticsFromTab: () => PageTranslationDiagnostics
+  retryFailedPageTranslations: (data?: { tabId?: number }) => Promise<{ retriedCount: number }>
+  retryFailedPageTranslationsFromTab: () => Promise<{ retriedCount: number }>
   // analytics
   trackFeatureUsedEvent: (data: FeatureUsedEventProperties) => void
   trackBuiltInAiPromptEvent: (data: BuiltInAiPromptEvent) => void

@@ -67,7 +67,7 @@ export default defineBackground({
       // Open local options page on fresh install so the user can enter their AI API key
       // without redirecting to external readfrog.app or probing traditional machine translators.
       if (details.reason === "install") {
-        await openOptionsPage({ route: "/api-providers" })
+        await openOptionsPage({ route: "/page-translation" })
       }
 
       // Clear blog cache on extension update to fetch latest blog posts

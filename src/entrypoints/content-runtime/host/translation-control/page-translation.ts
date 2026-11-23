@@ -64,7 +64,9 @@ import {
   claimPageTranslationRequestFailure,
   endPageTranslationSession,
   onPageTranslationRequestFailed,
+  setElementPriorityScheduleAt,
   setPageTranslationSessionProviderRef,
+  takeFailedTranslationRuns,
 } from "@/utils/host/translate/translation-session"
 import { cleanupNodeSiteRuleCSSIfUnused } from "@/utils/host/translate/ui/node-site-rule-css"
 import { cancelSpinnerAnimation } from "@/utils/host/translate/ui/spinner"
@@ -84,7 +86,7 @@ import {
 } from "@/utils/providers/provider-ref"
 import { removeReactShadowHost } from "@/utils/react-shadow-host/create-shadow-host"
 import { isTranslationCancelledError } from "@/utils/request/cancellation"
-import { createWorkPacer } from "@/utils/scheduler"
+import { createWorkPacer, pauseIfBudgetSpent } from "@/utils/scheduler"
 import { getDocumentSiteRule } from "@/utils/site-rules/effective"
 
 const log = createLogger("content-runtime/host/translation-control/page-translation")
@@ -348,6 +350,16 @@ export class PageTranslationManager implements IPageTranslationManager {
   private titleObserver: MutationObserver | null = null
   // Non-null exactly while the tab title is being tracked.
   private lastSourceTitle: string | null = null
+  private onlineRecoveryTimer: ReturnType<typeof setTimeout> | null = null
+  private handleNetworkOnline = (): void => {
+    if (!this.isPageTranslating) return
+    if (this.onlineRecoveryTimer !== null) clearTimeout(this.onlineRecoveryTimer)
+    this.onlineRecoveryTimer = setTimeout(() => {
+      this.onlineRecoveryTimer = null
+      if (!this.isPageTranslating) return
+      void this.retryFailedTranslations()
+    }, 300)
+  }
   private lastAppliedTranslatedTitle: string | null = null
   // Never reset: a request from before a stop or a switch-off must not match
   // a later one's version.
@@ -534,6 +546,7 @@ export class PageTranslationManager implements IPageTranslationManager {
 
       beginPageTranslationSession()
       setPageTranslationSessionProviderRef(availability.providerRef, reasoningChoice)
+      window.addEventListener("online", this.handleNetworkOnline)
       if (window === window.top) {
         this.listenForSpentPool(sessionVersion, analyticsContext)
       }
@@ -760,6 +773,11 @@ export class PageTranslationManager implements IPageTranslationManager {
     endParagraphDiagnosisSession()
 
     this.isPageTranslating = false
+    window.removeEventListener("online", this.handleNetworkOnline)
+    if (this.onlineRecoveryTimer !== null) {
+      clearTimeout(this.onlineRecoveryTimer)
+      this.onlineRecoveryTimer = null
+    }
     this.translationSessionVersion += 1
     this.walkId = null
     this.walkBlockedElementsCache = new WeakSet()
@@ -1224,6 +1242,35 @@ export class PageTranslationManager implements IPageTranslationManager {
     }
   }
 
+  async retryFailedTranslations(): Promise<number> {
+    if (!this.isPageTranslating || !this.walkId) return 0
+    const failedRuns = takeFailedTranslationRuns()
+    if (failedRuns.length === 0) return 0
+
+    const config = await getLocalConfig()
+    const walkId = this.walkId
+    if (!config || !this.isPageTranslating || !walkId) return 0
+
+    const pacer = createWorkPacer()
+    const now = Date.now()
+    let retried = 0
+    for (let i = 0; i < failedRuns.length; i++) {
+      const run = failedRuns[i]!.filter((n) => n.isConnected)
+      if (run.length === 0) continue
+      const anchor = run.find(isHTMLElement) ?? run[0]!.parentElement
+      if (anchor) {
+        setElementPriorityScheduleAt(anchor, now - 15_000 + i)
+      }
+      retried += 1
+      void (async () => {
+        await pauseIfBudgetSpent(pacer)
+        if (!this.isPageTranslating || this.walkId !== walkId) return
+        await translateNodes(run, walkId, false, config, false, false)
+      })()
+    }
+    return retried
+  }
+
   private translateIntersectedUnits(units: HTMLElement[], walkId: string): void {
     if (units.length === 0) return
     void (async () => {
@@ -1235,12 +1282,33 @@ export class PageTranslationManager implements IPageTranslationManager {
         return
       }
       if (this.walkId !== walkId) return
+
+      // Prioritize units currently inside the viewport top-to-bottom ahead of
+      // preloaded offscreen units so the visible screen finishes first.
+      const viewportHeight = window.innerHeight || 900
+      const measured = units.map((unit, originalIndex) => {
+        const rect = unit.getBoundingClientRect()
+        const isVisible = rect.bottom >= -80 && rect.top <= viewportHeight + 80
+        return { unit, top: rect.top, isVisible, originalIndex }
+      })
+      const visible = measured
+        .filter((m) => m.isVisible)
+        .sort((a, b) => a.top - b.top || a.originalIndex - b.originalIndex)
+      const offscreen = measured
+        .filter((m) => !m.isVisible)
+        .sort((a, b) => a.top - b.top || a.originalIndex - b.originalIndex)
+
+      const now = Date.now()
+      visible.forEach((m, i) => setElementPriorityScheduleAt(m.unit, now - 20_000 + i))
+      offscreen.forEach((m, i) => setElementPriorityScheduleAt(m.unit, now - 2_000 + i))
+      const orderedUnits = [...visible, ...offscreen].map((m) => m.unit)
+
       // One shared pacer bounds the batch's synchronous expansion work;
       // the liveness check stops paced expansion promptly if the user
       // cancels mid-flight (#1881).
       const pacer = createWorkPacer()
       const isWalkCurrent = () => this.walkId === walkId
-      for (const unit of units) {
+      for (const unit of orderedUnits) {
         void translateWalkedElement(unit, walkId, currentConfig, false, pacer, isWalkCurrent)
       }
     })()

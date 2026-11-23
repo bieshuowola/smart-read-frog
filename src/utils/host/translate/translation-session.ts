@@ -34,10 +34,114 @@ let currentSessionProviderRef: SerializableProviderRef | null = null
  */
 let currentSessionReasoningChoice: HostedAiReasoning | undefined
 
+// Viewport-first scheduling priorities keyed by intersected root element.
+let priorityScheduleMap = new WeakMap<Element, number>()
+
+export function setElementPriorityScheduleAt(element: Element, scheduleAt: number): void {
+  priorityScheduleMap.set(element, scheduleAt)
+}
+
+export function getPriorityScheduleAtForNodes(nodes: readonly Node[]): number | undefined {
+  for (const node of nodes) {
+    let cur: Node | null = node
+    let hops = 0
+    while (cur && hops < 16) {
+      if (cur instanceof Element) {
+        const score = priorityScheduleMap.get(cur)
+        if (score !== undefined) return score
+      }
+      cur = cur.parentNode
+      hops++
+    }
+  }
+  return undefined
+}
+
+// Per-session failure tracking for centralized popup diagnostics & targeted retry.
+const failedTranslationTargets = new Map<Node, { nodes: ChildNode[]; errorMessage: string; timestamp: number }>()
+let lastSessionFailureMessage: string | null = null
+let inFlightTranslationCount = 0
+
+function formatFailureMessage(error: unknown): string {
+  if (error instanceof Error) return error.message || error.name
+  return typeof error === "string" ? error : "Translation failed"
+}
+
+export function incrementInFlightPageTranslation(): void {
+  inFlightTranslationCount += 1
+}
+
+export function decrementInFlightPageTranslation(): void {
+  inFlightTranslationCount = Math.max(0, inFlightTranslationCount - 1)
+}
+
+export function getInFlightPageTranslationCount(): number {
+  return inFlightTranslationCount
+}
+
+export function reportPageTranslationNodeFailed(nodes: readonly ChildNode[], error: unknown): void {
+  const connected = nodes.filter((n) => n.isConnected)
+  if (connected.length === 0) return
+  const key = connected[0]!
+  const errorMessage = formatFailureMessage(error)
+  lastSessionFailureMessage = errorMessage
+  failedTranslationTargets.set(key, {
+    nodes: connected,
+    errorMessage,
+    timestamp: Date.now(),
+  })
+}
+
+export function clearPageTranslationNodeFailed(nodes: readonly ChildNode[]): void {
+  for (const node of nodes) {
+    failedTranslationTargets.delete(node)
+  }
+  // If all failed targets were cleared, reset the last failure banner message too.
+  pruneDisconnectedFailedTargets()
+  if (failedTranslationTargets.size === 0) {
+    lastSessionFailureMessage = null
+  }
+}
+
+function pruneDisconnectedFailedTargets(): void {
+  for (const [key, entry] of failedTranslationTargets) {
+    if (!key.isConnected || entry.nodes.every((n) => !n.isConnected)) {
+      failedTranslationTargets.delete(key)
+    }
+  }
+}
+
+export function takeFailedTranslationRuns(): ChildNode[][] {
+  pruneDisconnectedFailedTargets()
+  const runs = [...failedTranslationTargets.values()].map((entry) =>
+    entry.nodes.filter((n) => n.isConnected),
+  )
+  failedTranslationTargets.clear()
+  lastSessionFailureMessage = null
+  return runs.filter((run) => run.length > 0)
+}
+
+export function getPageTranslationFailureSummary(): {
+  failedCount: number
+  inFlightCount: number
+  lastErrorMessage: string | null
+} {
+  pruneDisconnectedFailedTargets()
+  return {
+    failedCount: failedTranslationTargets.size,
+    inFlightCount: inFlightTranslationCount,
+    lastErrorMessage: failedTranslationTargets.size > 0 ? lastSessionFailureMessage : null,
+  }
+}
+
 export function beginPageTranslationSession(): string {
   sessionCounter += 1
   currentSessionProviderRef = null
   currentSessionReasoningChoice = undefined
+  priorityScheduleMap = new WeakMap()
+  failedTranslationTargets.clear()
+  lastSessionFailureMessage = null
+  inFlightTranslationCount = 0
   currentPageTranslationSessionId = `${Date.now().toString(36)}-${Math.random()
     .toString(36)
     .slice(2, 10)}-${sessionCounter}`
@@ -49,6 +153,10 @@ export function endPageTranslationSession(): string | null {
   currentPageTranslationSessionId = null
   currentSessionProviderRef = null
   currentSessionReasoningChoice = undefined
+  priorityScheduleMap = new WeakMap()
+  failedTranslationTargets.clear()
+  lastSessionFailureMessage = null
+  inFlightTranslationCount = 0
   return endedSessionId
 }
 

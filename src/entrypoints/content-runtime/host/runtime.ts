@@ -11,6 +11,7 @@ import {
 import { CONFIG_STORAGE_KEY, DEFAULT_CONFIG } from "@/utils/constants/config"
 import { detectPageLanguageLightweight } from "@/utils/content/page-language"
 import { ensurePresetStyles } from "@/utils/host/translate/ui/style-injector"
+import { getPageTranslationFailureSummary } from "@/utils/host/translate/translation-session"
 import { createLogger } from "@/utils/logging/logger"
 import { onMessage, sendMessage } from "@/utils/message"
 import { clearEffectiveSiteControlUrl } from "@/utils/site-control"
@@ -262,6 +263,22 @@ export async function bootstrapHostContent(
       ? onMessage("togglePageTranslationDiagnostics", () => togglePageDiagnosisPanel())
       : () => {}
 
+  const cleanupPageDiagnosticsQueryListener =
+    window === window.top
+      ? onMessage("getPageTranslationDiagnosticsFromTab", () => ({
+          isActive: manager.isActive,
+          ...getPageTranslationFailureSummary(),
+        }))
+      : () => {}
+
+  const cleanupRetryFailedListener =
+    window === window.top
+      ? onMessage("retryFailedPageTranslationsFromTab", async () => {
+          const retriedCount = await manager.retryFailedTranslations()
+          return { retriedCount }
+        })
+      : () => {}
+
   ctx.onInvalidated(() => {
     cleanupUrlListener()
     teardownNodeTranslation()
@@ -274,6 +291,8 @@ export async function bootstrapHostContent(
     cleanupFrameTranslationStateListener()
     cleanupDetectedLanguageRefreshListener()
     cleanupPageDiagnosisListener()
+    cleanupPageDiagnosticsQueryListener()
+    cleanupRetryFailedListener()
     closePageDiagnosisPanel()
     stopSkipReevalObserver()
     clearCurrentPageSmartDecision()

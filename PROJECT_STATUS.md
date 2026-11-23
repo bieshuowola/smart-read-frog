@@ -1,14 +1,10 @@
-# PROJECT_STATUS - Smart Read Frog
+# 智译蛙 Smart Read Frog 状态摘要
 
-## 版本与扩展身份
-- `1.61.1-smart.2`（MV3 `1.61.1.2`），Fork 自 `mengxi-ream/read-frog` `v1.61.1`（GPL-3.0）。
-- `wxt.config.ts` 固定专用 SPKI 公钥，锁定 ID `fbjkcfaokdnppjoanibkkplgbloeooih`，不冲突且升级保留数据。
-
-## 默认 AI 与切流
-- 主用 Groq `qwen/qwen3.8-27b`（禁思考）；备选 Gemini `gemini-3.5-flash-lite`、OpenRouter `:free` 与 Ollama。
-- 移除停免 `llama-3.3-70b-versatile`、绑卡试用的 Cerebras 及付费 SiliconFlow 默认项；`config-upgrade.ts` 自动迁移旧配置。
-
-## 红线、验证与命令
-- 红线：保 Schema `v128` 与 `"1.61.1"`；禁传统机翻及付费兜底；禁内置私钥/API Key。
-- 已验：`type-check` 0 错；`test` 508 文件/5480 用例；Edge 158 实测 Ollama、429/404/503 切流与升级保数据过。云端 Key 与 Quetta 未实测。
-- 命令：`pnpm type-check` / `pnpm test` / `pnpm build` / `pnpm zip` / `pnpm zip:edge`。
+- **版本/ID**：`1.61.1-smart.3`（manifest `1.61.1.3`），ID `fbjkcfaokdnppjoanibkkplgbloeooih`，Schema `128`。
+- **路径**：源码 `C:\Users\Administrator\.gemini\antigravity\scratch\smart-read-frog`；运行目录 `D:\smart-read-frog-1.61.1-smart.2`（备份 `D:\smart-read-frog-1.61.1-smart.2-backup`）。
+- **核心架构**：
+  - 网页翻译默认微软极速引擎（独立并发/原生批量+视口优先+失败二分隔离），可选 Google/Gemini AI；「微软不可用时尝试 Google 翻译」默认关闭。
+  - 完整保留 `src/utils/smart-translate/` 智能决策与中文局部「译文」标；按钮/导航原位替换；失败静默留原文并集中弹窗「重试未翻译内容」。
+  - 设置页精简为「网页翻译」「视频字幕」「网站例外」，保留网页与字幕独立高级样式及完整视频字幕链路。
+- **红线**：禁改扩展 ID 与 Schema 128；禁泄 Key；禁未授权调付费兜底；禁正文留错误/重试图标。
+- **命令**：`pnpm type-check`、`pnpm test`、`pnpm build:edge`、`pnpm zip:edge`、`pnpm zip`。

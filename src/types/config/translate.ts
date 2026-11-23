@@ -64,6 +64,15 @@ export type PreloadConfig = z.infer<typeof preloadConfigSchema>
 export const translationNodeStylePresetSchema = z.enum(TRANSLATION_NODE_STYLE)
 export type TranslationNodeStylePreset = z.infer<typeof translationNodeStylePresetSchema>
 
+export const webTranslationFontFamilySchema = z.enum([
+  "inherit",
+  "system",
+  "sans",
+  "serif",
+  "mono",
+])
+export type WebTranslationFontFamily = z.infer<typeof webTranslationFontFamilySchema>
+
 export const MAX_CUSTOM_CSS_LENGTH = 8192
 
 // Translation node style configuration
@@ -71,6 +80,12 @@ export const translationNodeStyleConfigSchema = z.object({
   preset: translationNodeStylePresetSchema,
   isCustom: z.boolean(),
   customCSS: z.string().max(MAX_CUSTOM_CSS_LENGTH, "Custom CSS cannot exceed 8KB").nullable(),
+  fontFamily: webTranslationFontFamilySchema.optional(),
+  fontSizeScale: z.number().min(75).max(150).optional(),
+  color: z.string().nullable().optional(),
+  lineHeight: z.number().min(1.1).max(2.4).optional(),
+  fontWeight: z.number().min(300).max(700).optional(),
+  paragraphSpacing: z.number().min(0).max(24).optional(),
 })
 
 export type TranslationNodeStyleConfig = z.infer<typeof translationNodeStyleConfigSchema>
@@ -227,6 +242,7 @@ export const translateConfigSchema = z.object({
     privacyGuardEnabled: z.boolean().default(true),
   }),
   fallbackProviderIds: z.array(storedProviderIdSchema).default([]),
+  microsoftGoogleFallback: z.boolean().default(false),
   enableAIContentAware: z.boolean(),
   customPromptsConfig: customPromptsConfigSchema,
   requestQueueConfig: requestQueueConfigSchema,

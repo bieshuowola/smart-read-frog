@@ -34,6 +34,7 @@ import {
   buildDefaultProviderConfigList,
   DEFAULT_PROVIDER_CONFIG,
   DEFAULT_PROVIDER_CONFIG_LIST,
+  MICROSOFT_TRANSLATE_PROVIDER_ID,
 } from "./providers"
 import {
   DEFAULT_ANNOTATION_MODE_SHORTCUT_KEY,
@@ -179,7 +180,7 @@ export const DEFAULT_CONFIG: Config = {
   },
   providersConfig: DEFAULT_PROVIDER_CONFIG_LIST,
   pageTranslation: {
-    providerId: DEFAULT_AI_PROVIDER_ID,
+    providerId: MICROSOFT_TRANSLATE_PROVIDER_ID,
     mode: "bilingual",
     modeShortcut: DEFAULT_TRANSLATION_MODE_SHORTCUT_KEY,
     node: {
@@ -206,7 +207,8 @@ export const DEFAULT_CONFIG: Config = {
       smartAutoTranslate: true,
       privacyGuardEnabled: true,
     },
-    fallbackProviderIds: [...DEFAULT_FALLBACK_AI_PROVIDER_IDS],
+    fallbackProviderIds: [],
+    microsoftGoogleFallback: false,
     enableAIContentAware: false,
     customPromptsConfig: DEFAULT_TRANSLATE_PROMPTS_CONFIG,
     requestQueueConfig: {
@@ -222,6 +224,12 @@ export const DEFAULT_CONFIG: Config = {
       preset: TRANSLATION_NODE_STYLE_ON_INSTALLED,
       isCustom: false,
       customCSS: null,
+      fontFamily: "inherit",
+      fontSizeScale: 100,
+      color: null,
+      lineHeight: 1.5,
+      fontWeight: 400,
+      paragraphSpacing: 8,
     },
   },
   languageDetection: {
@@ -229,7 +237,7 @@ export const DEFAULT_CONFIG: Config = {
   },
   tts: DEFAULT_TTS_CONFIG,
   floatingButton: {
-    enabled: true,
+    enabled: false,
     position: DEFAULT_FLOATING_BUTTON_POSITION,
     side: DEFAULT_FLOATING_BUTTON_SIDE,
     disabledFloatingButtonPatterns: [],
@@ -237,7 +245,7 @@ export const DEFAULT_CONFIG: Config = {
     locked: false,
   },
   selectionToolbar: {
-    enabled: true,
+    enabled: false,
     disabledSelectionToolbarPatterns: [],
     opacity: DEFAULT_SELECTION_OVERLAY_OPACITY,
     placement: "followDirection",
@@ -293,7 +301,7 @@ export const DEFAULT_CONFIG: Config = {
     enabled: true,
   },
   inputTranslation: {
-    enabled: true,
+    enabled: false,
     providerId: DEFAULT_AI_PROVIDER_ID,
     fromLang: "targetCode",
     toLang: "sourceCode",
@@ -368,10 +376,10 @@ export const DEFAULT_CONFIG: Config = {
 }
 
 /**
- * A fresh install defaults to verified zero-cost AI LLM providers: Groq (`qwen/qwen3.8-27b`)
- * primary with Gemini (`gemini-3.5-flash-lite`) and OpenRouter (`:free`) fallbacks,
- * targeting Simplified Chinese (`zh-Hans`) with smart auto-translation enabled.
- * Never uses traditional machine translation or paid services as default or fallback.
+ * A fresh install defaults to Microsoft Translate (`microsoft-translate-default`) for fast,
+ * zero-key webpage translation targeting Simplified Chinese (`zh-Hans`) with smart auto-translation
+ * enabled and natural inherited text styling. Video subtitles and optional AI translation keep
+ * independent provider configurations.
  */
 export function buildFreshDefaultConfig(): Config {
   return {
@@ -379,8 +387,9 @@ export function buildFreshDefaultConfig(): Config {
     providersConfig: buildDefaultProviderConfigList(),
     pageTranslation: {
       ...DEFAULT_CONFIG.pageTranslation,
-      providerId: DEFAULT_AI_PROVIDER_ID,
-      fallbackProviderIds: [...DEFAULT_FALLBACK_AI_PROVIDER_IDS],
+      providerId: MICROSOFT_TRANSLATE_PROVIDER_ID,
+      fallbackProviderIds: [],
+      microsoftGoogleFallback: false,
     },
     inputTranslation: {
       ...DEFAULT_CONFIG.inputTranslation,

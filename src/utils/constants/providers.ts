@@ -741,6 +741,8 @@ export const PROVIDER_URL_PLACEHOLDERS: Partial<Record<APIProviderTypes, string>
 }
 
 export const DEFAULT_PROVIDER_CONFIG_LIST: ProvidersConfig = [
+  DEFAULT_PROVIDER_CONFIG["microsoft-translate"],
+  DEFAULT_PROVIDER_CONFIG["google-translate"],
   DEFAULT_PROVIDER_CONFIG.groq,
   DEFAULT_PROVIDER_CONFIG.google,
   DEFAULT_PROVIDER_CONFIG.openrouter,

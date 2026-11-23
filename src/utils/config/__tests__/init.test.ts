@@ -237,4 +237,57 @@ describe("initializeConfig", () => {
       }),
     )
   })
+
+  it("migrates legacy v128 config (without microsoftGoogleFallback) once to Microsoft while preserving keys/styles and stays idempotent", async () => {
+    const legacyConfig = buildStableConfig() as Record<string, any>
+    delete legacyConfig.pageTranslation.microsoftGoogleFallback
+    legacyConfig.pageTranslation.providerId = "google-default"
+    legacyConfig.pageTranslation.page.neverAutoTranslatePatterns = ["keep-me.example"]
+    legacyConfig.pageTranslation.translationNodeStyle.customCSS = ".test { color: red; }"
+    legacyConfig.providersConfig = legacyConfig.providersConfig.filter(
+      (p: any) => p.id !== "microsoft-translate-default" && p.id !== "google-translate-default",
+    )
+    const gemini = legacyConfig.providersConfig.find((p: any) => p.id === "google-default")
+    gemini.apiKey = "AIzaSyKeepUserGeminiKey123"
+    gemini.model = {
+      model: "gemini-3.5-flash-lite",
+      isCustomModel: true,
+      customModel: "gemini-custom-test",
+    }
+
+    getItemMock.mockResolvedValueOnce(legacyConfig)
+    getMetaMock.mockResolvedValueOnce({
+      schemaVersion: CONFIG_SCHEMA_VERSION,
+      lastModifiedAt: 999,
+    })
+
+    const { initializeConfig } = await import("../init")
+    const first = await initializeConfig()
+    expect(first.isFreshInstall).toBe(false)
+    expect(setItemMock).toHaveBeenCalledTimes(1)
+
+    const upgraded = setItemMock.mock.calls[0]?.[1] as Config
+    expect(upgraded.pageTranslation.providerId).toBe("microsoft-translate-default")
+    expect(upgraded.pageTranslation.microsoftGoogleFallback).toBe(false)
+    expect(upgraded.pageTranslation.page.neverAutoTranslatePatterns).toEqual(["keep-me.example"])
+    expect(upgraded.pageTranslation.translationNodeStyle.customCSS).toBe(".test { color: red; }")
+    const upgradedGemini = upgraded.providersConfig.find((p) => p.id === "google-default")
+    expect(upgradedGemini && isAPIProviderConfig(upgradedGemini) ? upgradedGemini.apiKey : null).toBe(
+      "AIzaSyKeepUserGeminiKey123",
+    )
+    expect(upgraded.providersConfig.some((p) => p.id === "microsoft-translate-default")).toBe(true)
+
+    // User switches back to Gemini AI later -> restart keeps Gemini AI cleanly
+    setItemMock.mockClear()
+    const userReselected = structuredClone(upgraded)
+    userReselected.pageTranslation.providerId = "google-default"
+    getItemMock.mockResolvedValueOnce(userReselected)
+    getMetaMock.mockResolvedValueOnce({
+      schemaVersion: CONFIG_SCHEMA_VERSION,
+      lastModifiedAt: 1000,
+    })
+
+    await initializeConfig()
+    expect(setItemMock).not.toHaveBeenCalled()
+  })
 })

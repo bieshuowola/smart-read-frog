@@ -5,6 +5,11 @@ import type { TranslationMode } from "@/types/config/translate"
 import { act, render, screen, waitFor } from "@testing-library/react"
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 import { DEFAULT_CONFIG } from "@/utils/constants/config"
+import { GOOGLE_TRANSLATE_PROVIDER_ID } from "@/utils/constants/providers"
+import {
+  beginPageTranslationSession,
+  getPageTranslationFailureSummary,
+} from "@/utils/host/translate/translation-session"
 import {
   BLOCK_ATTRIBUTE,
   BLOCK_CONTENT_CLASS,
@@ -68,6 +73,7 @@ const TRANSLATION_ONLY_CONFIG: Config = {
   ...DEFAULT_CONFIG,
   pageTranslation: {
     ...DEFAULT_CONFIG.pageTranslation,
+    providerId: GOOGLE_TRANSLATE_PROVIDER_ID,
     mode: "translationOnly" as const,
     page: {
       ...DEFAULT_CONFIG.pageTranslation.page,
@@ -188,12 +194,6 @@ describe("translate", () => {
       await translateWalkedElement(document.body, id, effectiveConfig, toggle)
       // Flush batched DOM operations to ensure all changes are applied before assertions
       flushBatchedOperations()
-    })
-  }
-
-  async function waitForTranslationError(wrapper: Element | null) {
-    await waitFor(() => {
-      expect(wrapper?.querySelector(`.${TRANSLATION_ERROR_CONTAINER_CLASS}`)).toBeTruthy()
     })
   }
 
@@ -2584,28 +2584,34 @@ describe("translate", () => {
   })
 
   describe("translation errors", () => {
-    it("bilingual mode: should keep original text and show inline error UI when translation fails", async () => {
+    beforeEach(() => {
+      beginPageTranslationSession()
+    })
+
+    it("bilingual mode: keeps original text without inline error icons and records failure", async () => {
       vi.mocked(translateTextForPage).mockRejectedValueOnce(new Error("Translation failed"))
 
       render(<div data-testid="test-node">{MOCK_ORIGINAL_TEXT}</div>)
       const node = screen.getByTestId("test-node")
       await removeOrShowPageTranslation("bilingual", true)
 
-      const wrapper = expectTranslationWrapper(node, "bilingual")
-      expect(node.textContent).toContain(MOCK_ORIGINAL_TEXT)
-      await waitForTranslationError(wrapper)
+      expect(node.querySelector(`.${TRANSLATION_ERROR_CONTAINER_CLASS}`)).toBeFalsy()
+      expect(node.querySelector(`.${CONTENT_WRAPPER_CLASS}`)).toBeFalsy()
+      expect(node.textContent).toBe(MOCK_ORIGINAL_TEXT)
+      expect(getPageTranslationFailureSummary().failedCount).toBe(1)
     })
 
-    it("translationOnly mode: should keep original text and show inline error UI when translation fails", async () => {
+    it("translationOnly mode: keeps original text without inline error icons and records failure", async () => {
       vi.mocked(translateTextForPage).mockRejectedValueOnce(new Error("Translation failed"))
 
       render(<div data-testid="test-node">{MOCK_ORIGINAL_TEXT}</div>)
       const node = screen.getByTestId("test-node")
       await removeOrShowPageTranslation("translationOnly", true)
 
-      const wrapper = expectTranslationWrapper(node, "translationOnly")
-      expect(node.textContent).toContain(MOCK_ORIGINAL_TEXT)
-      await waitForTranslationError(wrapper)
+      expect(node.querySelector(`.${TRANSLATION_ERROR_CONTAINER_CLASS}`)).toBeFalsy()
+      expect(node.querySelector(`.${CONTENT_WRAPPER_CLASS}`)).toBeFalsy()
+      expect(node.textContent).toBe(MOCK_ORIGINAL_TEXT)
+      expect(getPageTranslationFailureSummary().failedCount).toBe(1)
     })
 
     it("translationOnly mode: should still remove the wrapper when translation returns an empty string", async () => {
@@ -3164,7 +3170,8 @@ describe("translate", () => {
       expect(translatedStrong?.className).toBe("place")
     })
 
-    it("keeps the source DOM and existing error UI when the full HTML fallback fails", async () => {
+    it("keeps the source DOM clean with no inline error UI when the full HTML fallback fails", async () => {
+      beginPageTranslationSession()
       vi.mocked(translateTextForPage)
         .mockResolvedValueOnce(`<strong>损坏的 marker</strong>`)
         .mockRejectedValueOnce(new Error("Fallback failed"))
@@ -3179,9 +3186,10 @@ describe("translate", () => {
       await removeOrShowPageTranslation("translationOnly", true)
 
       expect(translateTextForPage).toHaveBeenCalledTimes(2)
-      const wrapper = expectTranslationWrapper(node, "translationOnly")
-      expect(node.textContent).toContain("I visited Vancouver.")
-      await waitForTranslationError(wrapper)
+      expect(node.querySelector(`.${TRANSLATION_ERROR_CONTAINER_CLASS}`)).toBeFalsy()
+      expect(node.querySelector(`.${CONTENT_WRAPPER_CLASS}`)).toBeFalsy()
+      expect(node.textContent).toBe("I visited Vancouver.")
+      expect(getPageTranslationFailureSummary().failedCount).toBe(1)
     })
 
     it("disables placeholders for the current DeepLX endpoint after its first integrity failure", async () => {
@@ -3623,6 +3631,7 @@ describe("translate", () => {
       })
 
       it("translation only mode: keeps a failing paragraph from taking the others down", async () => {
+        beginPageTranslationSession()
         vi.mocked(translateTextForPage).mockImplementation(async (text) => {
           if (text === paragraphs[1]) throw new Error("provider exploded")
           const index = paragraphs.indexOf(text)
@@ -3634,9 +3643,11 @@ describe("translate", () => {
 
         expect(viewer.textContent).toContain(translations[0])
         expect(viewer.textContent).toContain(translations[2])
-        // The failed unit keeps its own source text and its error UI.
+        // The failed unit keeps its own source text cleanly without inline error UI.
         expect(viewer.textContent).toContain(paragraphs[1])
-        await waitForTranslationError(viewer)
+        expect(viewer.querySelector(`.${TRANSLATION_ERROR_CONTAINER_CLASS}`)).toBeFalsy()
+        expect(viewer.querySelector(`.${CONTENT_WRAPPER_CLASS}`)).toBeFalsy()
+        expect(getPageTranslationFailureSummary().failedCount).toBe(1)
       })
     })
 

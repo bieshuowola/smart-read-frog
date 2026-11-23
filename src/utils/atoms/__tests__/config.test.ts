@@ -16,6 +16,7 @@ describe("mergeWithArrayOverwrite", () => {
       },
       floatingButton: {
         ...DEFAULT_CONFIG.floatingButton,
+        enabled: true,
         disabledFloatingButtonPatterns: ["gmail.com"],
       },
     }

@@ -48,8 +48,8 @@ export default defineConfig({
   manifest: ({ browser }) => ({
     name: "__MSG_extName__",
     description: "__MSG_extDescription__",
-    version: "1.61.1.2",
-    version_name: "1.61.1-smart.2",
+    version: "1.61.1.3",
+    version_name: "1.61.1-smart.3",
     default_locale: "en",
     // Pin a dedicated public key on Chromium builds so unpacked/ZIP upgrades keep
     // Extension ID `fbjkcfaokdnppjoanibkkplgbloeooih` without colliding with official Read Frog.

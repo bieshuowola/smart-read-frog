@@ -8,6 +8,7 @@ import { isTranslationCancelledError } from "@/utils/request/cancellation"
 const onMessageMock = vi.fn<(...args: any[]) => any>()
 const ensureInitializedConfigMock = vi.fn<(...args: any[]) => any>()
 const executeTranslateMock = vi.fn<(...args: any[]) => any>()
+const executeMicrosoftBatchTranslateMock = vi.fn<(...args: any[]) => any>()
 const generateArticleSummaryMock = vi.fn<(...args: any[]) => any>()
 const generateTextForProviderRefMock = vi.fn<(...args: any[]) => any>()
 const putBatchRequestRecordMock = vi.fn<(...args: any[]) => any>()
@@ -29,6 +30,7 @@ vi.mock("../config", () => ({
 
 vi.mock("@/utils/host/translate/execute-translate", () => ({
   executeTranslate: executeTranslateMock,
+  executeMicrosoftBatchTranslate: executeMicrosoftBatchTranslateMock,
 }))
 
 vi.mock("@/utils/content/summary", () => ({
@@ -156,6 +158,9 @@ describe("translation queue helpers", () => {
     })
 
     executeTranslateMock.mockResolvedValue("translated subtitle")
+    executeMicrosoftBatchTranslateMock.mockImplementation(async (texts: string[]) =>
+      texts.map((t) => `ms:${t}`),
+    )
     generateArticleSummaryMock.mockResolvedValue("Generated summary")
     putBatchRequestRecordMock.mockResolvedValue(undefined)
     articleSummaryCacheGetMock.mockResolvedValue(undefined)
@@ -2071,7 +2076,7 @@ describe("translation queue helpers", () => {
       const attempts = hangProviderCalls()
       await setupHandlers()
 
-      sendPageRequest(localProviderRef(googleProvider), "hello", "timeout-google")
+      sendPageRequest(localProviderRef(deepLProvider), "hello", "timeout-deepl")
 
       const attempt = await waitForAbort(attempts)
       expect(attempt.abortedAt - attempt.startedAt).toBe(45_000)
@@ -2097,7 +2102,7 @@ describe("translation queue helpers", () => {
       const { CONFIG_STORAGE_KEY } = await import("@/utils/constants/config")
       await setupHandlers()
 
-      sendPageRequest(localProviderRef(googleProvider), "first", "timeout-before")
+      sendPageRequest(localProviderRef(deepLProvider), "first", "timeout-before")
       const before = await waitForAbort(attempts)
       expect(before.abortedAt - before.startedAt).toBe(20_000)
 
@@ -2105,7 +2110,7 @@ describe("translation queue helpers", () => {
       await fakeBrowser.storage.local.set({ [CONFIG_STORAGE_KEY]: configWithTimeout(90_000) })
       await vi.advanceTimersByTimeAsync(0)
 
-      sendPageRequest(localProviderRef(googleProvider), "second", "timeout-after")
+      sendPageRequest(localProviderRef(deepLProvider), "second", "timeout-after")
       await vi.advanceTimersByTimeAsync(0)
       // The first request keeps retrying alongside, so find the second one's
       // attempt by its text (each provider call records exactly one attempt).
@@ -2138,6 +2143,175 @@ describe("translation queue helpers", () => {
       expect(first.abortedAt - first.startedAt).toBe(20_000 + 1000 * 15)
       const retry = await waitForAbort(attempts, 1)
       expect(retry.abortedAt - retry.startedAt).toBe(60_000 + 1000 * 15)
+    })
+  })
+
+  describe("Microsoft dedicated MT queue and optional Google fallback", () => {
+    const microsoftProvider: ProviderConfig = {
+      id: "microsoft-translate-default",
+      name: "Microsoft Translate",
+      provider: "microsoft-translate",
+      enabled: true,
+    }
+
+    it("batches Microsoft webpage requests via executeMicrosoftBatchTranslate in parallel without LLM batch delay", async () => {
+      vi.useFakeTimers()
+      await import("../page-translation").then((m) => m.setupPageTranslationHandlers())
+
+      const send = getRegisteredMessageHandler("enqueueTranslateRequest")
+      const p1 = send({
+        data: {
+          text: "First paragraph",
+          langConfig: DEFAULT_CONFIG.language,
+          providerRef: localProviderRef(microsoftProvider),
+          scheduleAt: Date.now() - 20_000,
+          hash: "ms-batch-1",
+        },
+      })
+      const p2 = send({
+        data: {
+          text: "Second paragraph",
+          langConfig: DEFAULT_CONFIG.language,
+          providerRef: localProviderRef(microsoftProvider),
+          scheduleAt: Date.now() - 20_000,
+          hash: "ms-batch-2",
+        },
+      })
+
+      await vi.advanceTimersByTimeAsync(100)
+      await expect(Promise.all([p1, p2])).resolves.toEqual([
+        "ms:First paragraph",
+        "ms:Second paragraph",
+      ])
+      expect(executeMicrosoftBatchTranslateMock).toHaveBeenCalledTimes(1)
+      expect(executeMicrosoftBatchTranslateMock.mock.calls[0]![0]).toEqual([
+        "First paragraph",
+        "Second paragraph",
+      ])
+    })
+
+    it("does NOT fall back to Google or Gemini when microsoftGoogleFallback is false", async () => {
+      vi.useFakeTimers()
+      const { fakeBrowser } = await import("wxt/testing/fake-browser")
+      const { CONFIG_STORAGE_KEY } = await import("@/utils/constants/config")
+      await fakeBrowser.storage.local.set({
+        [CONFIG_STORAGE_KEY]: {
+          ...DEFAULT_CONFIG,
+          pageTranslation: {
+            ...DEFAULT_CONFIG.pageTranslation,
+            microsoftGoogleFallback: false,
+          },
+        },
+      })
+      executeMicrosoftBatchTranslateMock.mockRejectedValue(new Error("Microsoft 503"))
+      executeTranslateMock.mockRejectedValue(new Error("Microsoft single 503"))
+
+      const { setupPageTranslationHandlers } = await import("../page-translation")
+      setupPageTranslationHandlers()
+
+      const pending = getRegisteredMessageHandler("enqueueTranslateRequest")({
+        data: {
+          text: "Unavailable test",
+          langConfig: DEFAULT_CONFIG.language,
+          providerRef: localProviderRef(microsoftProvider),
+          scheduleAt: Date.now(),
+          hash: "ms-no-fallback",
+        },
+      })
+
+      await expect(fastForward(pending)).rejects.toThrow("Microsoft")
+      expect(
+        executeTranslateMock.mock.calls.some(
+          ([, , provider]) => (provider as ProviderConfig)?.provider === "google-translate",
+        ),
+      ).toBe(false)
+    })
+
+    it("falls back to Google Translate when microsoftGoogleFallback is explicitly enabled", async () => {
+      vi.useFakeTimers()
+      const { fakeBrowser } = await import("wxt/testing/fake-browser")
+      const { CONFIG_STORAGE_KEY } = await import("@/utils/constants/config")
+      await fakeBrowser.storage.local.set({
+        [CONFIG_STORAGE_KEY]: {
+          ...DEFAULT_CONFIG,
+          pageTranslation: {
+            ...DEFAULT_CONFIG.pageTranslation,
+            microsoftGoogleFallback: true,
+          },
+        },
+      })
+      executeMicrosoftBatchTranslateMock.mockRejectedValue(new Error("Microsoft 503"))
+      executeTranslateMock.mockImplementation(
+        async (_text: string, _lang: unknown, provider: ProviderConfig) => {
+          if (provider.provider === "microsoft-translate") {
+            throw new Error("Microsoft individual 503")
+          }
+          if (provider.provider === "google-translate") {
+            return "google-fallback-ok"
+          }
+          throw new Error(`Unexpected provider ${provider.provider}`)
+        },
+      )
+
+      const { setupPageTranslationHandlers } = await import("../page-translation")
+      setupPageTranslationHandlers()
+
+      const pending = getRegisteredMessageHandler("enqueueTranslateRequest")({
+        data: {
+          text: "Fallback test",
+          langConfig: DEFAULT_CONFIG.language,
+          providerRef: localProviderRef(microsoftProvider),
+          scheduleAt: Date.now(),
+          hash: "ms-with-fallback",
+        },
+      })
+
+      await expect(fastForward(pending)).resolves.toBe("google-fallback-ok")
+    })
+
+    it("isolates a single poisoned item inside a Microsoft batch so healthy siblings still succeed", async () => {
+      vi.useFakeTimers()
+      const { fakeBrowser } = await import("wxt/testing/fake-browser")
+      const { CONFIG_STORAGE_KEY } = await import("@/utils/constants/config")
+      await fakeBrowser.storage.local.set({
+        [CONFIG_STORAGE_KEY]: {
+          ...DEFAULT_CONFIG,
+          pageTranslation: {
+            ...DEFAULT_CONFIG.pageTranslation,
+            microsoftGoogleFallback: false,
+          },
+        },
+      })
+
+      executeMicrosoftBatchTranslateMock.mockImplementation(async (texts: string[]) => {
+        if (texts.some((t) => t.includes("Beta"))) {
+          throw new Error("Poisoned segment Beta")
+        }
+        return texts.map((t) => `ok:${t}`)
+      })
+
+      const { setupPageTranslationHandlers } = await import("../page-translation")
+      setupPageTranslationHandlers()
+      const send = getRegisteredMessageHandler("enqueueTranslateRequest")
+
+      const p1 = send({
+        data: { text: "Alpha", langConfig: DEFAULT_CONFIG.language, providerRef: localProviderRef(microsoftProvider), scheduleAt: Date.now() - 20_000, hash: "iso-1" },
+      })
+      const p2 = send({
+        data: { text: "Beta", langConfig: DEFAULT_CONFIG.language, providerRef: localProviderRef(microsoftProvider), scheduleAt: Date.now() - 20_000, hash: "iso-2" },
+      })
+      const p3 = send({
+        data: { text: "Gamma", langConfig: DEFAULT_CONFIG.language, providerRef: localProviderRef(microsoftProvider), scheduleAt: Date.now() - 20_000, hash: "iso-3" },
+      })
+      const p4 = send({
+        data: { text: "Delta", langConfig: DEFAULT_CONFIG.language, providerRef: localProviderRef(microsoftProvider), scheduleAt: Date.now() - 20_000, hash: "iso-4" },
+      })
+
+      const settled = await fastForward(Promise.allSettled([p1, p2, p3, p4]))
+      expect(settled[0]).toEqual({ status: "fulfilled", value: "ok:Alpha" })
+      expect(settled[1]?.status).toBe("rejected")
+      expect(settled[2]).toEqual({ status: "fulfilled", value: "ok:Gamma" })
+      expect(settled[3]).toEqual({ status: "fulfilled", value: "ok:Delta" })
     })
   })
 })

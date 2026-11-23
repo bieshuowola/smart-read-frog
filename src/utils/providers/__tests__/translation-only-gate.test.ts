@@ -15,18 +15,15 @@ import {
 // verified in the browser.
 
 describe("providerSupportsTranslationOnlyMode", () => {
-  it("refuses the providers whose endpoint cannot preserve markup", () => {
-    expect(providerSupportsTranslationOnlyMode("microsoft-translate")).toBe(false)
-  })
-
-  it("allows every provider not on that list", () => {
+  it("supports Microsoft Translate via in-place swap alongside markup-preserving providers", () => {
+    expect(providerSupportsTranslationOnlyMode("microsoft-translate")).toBe(true)
     expect(providerSupportsTranslationOnlyMode("google-translate")).toBe(true)
     expect(providerSupportsTranslationOnlyMode("deeplx")).toBe(true)
   })
 })
 
 describe("getTranslationOnlyBlockedReason", () => {
-  it("allows fresh AI-first profile and blocks a profile configured on Microsoft", () => {
+  it("allows Microsoft default profile as well as Google and LLM profiles in translationOnly mode", () => {
     expect(getTranslationOnlyBlockedReason(DEFAULT_CONFIG)).toBeNull()
 
     const microsoftConfig = {
@@ -40,7 +37,7 @@ describe("getTranslationOnlyBlockedReason", () => {
         providerId: MICROSOFT_TRANSLATE_PROVIDER_ID,
       },
     }
-    expect(getTranslationOnlyBlockedReason(microsoftConfig)).not.toBeNull()
+    expect(getTranslationOnlyBlockedReason(microsoftConfig)).toBeNull()
   })
 
   it("clears once page translation moves to a provider that keeps markup", () => {

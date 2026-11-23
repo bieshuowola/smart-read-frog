@@ -58,23 +58,33 @@ function HydrateAtoms({
   return children
 }
 
+async function resolvePopupTargetTab() {
+  const explicitId = Number(new URLSearchParams(window.location.search).get("tabId"))
+  if (Number.isInteger(explicitId) && explicitId > 0) {
+    const tab = await browser.tabs.get(explicitId).catch(() => undefined)
+    if (tab) return tab
+  }
+  const [activeTab] = await browser.tabs.query({
+    active: true,
+    currentWindow: true,
+  })
+  return activeTab
+}
+
 async function initApp() {
   const root = document.getElementById("root")!
   root.className = "text-base antialiased w-[320px] bg-background"
 
-  const [configValue, themeMode, activeTab] = await Promise.all([
+  const [configValue, themeMode, targetTab] = await Promise.all([
     getLocalConfig(),
     getLocalThemeMode(),
-    browser.tabs.query({
-      active: true,
-      currentWindow: true,
-    }),
+    resolvePopupTargetTab(),
   ])
   const config = configValue ?? DEFAULT_CONFIG
 
   await initI18n(config.uiLanguage)
 
-  const tabId = activeTab[0]!.id
+  const tabId = targetTab?.id
 
   let isPageTranslated: boolean = false
   if (tabId) {
@@ -86,7 +96,7 @@ async function initApp() {
 
   const isInPatterns = tabId ? await getIsInPatterns(config.pageTranslation) : false
 
-  const activeTabUrl = activeTab[0]?.url || ""
+  const activeTabUrl = targetTab?.url || ""
   const isIgnoreTab = isIgnoreUrl(activeTabUrl)
   const isInWhitelist = activeTabUrl
     ? isInSiteControlList(config.siteControl.whitelistPatterns, activeTabUrl)

@@ -66,9 +66,9 @@ describe("dEFAULT_CONFIG", () => {
     }
 
     expect(parseResult.success).toBe(true)
-    // AI-first order: free/fast cloud LLMs lead the default provider list and all
-    // translation features default to AI models rather than traditional MT.
     expect(DEFAULT_CONFIG.providersConfig.map((provider) => provider.id)).toEqual([
+      "microsoft-translate-default",
+      "google-translate-default",
       "groq-default",
       "google-default",
       "openrouter-default",
@@ -77,11 +77,9 @@ describe("dEFAULT_CONFIG", () => {
       "deepseek-default",
       "openai-default",
     ])
-    expect(DEFAULT_CONFIG.pageTranslation.providerId).toBe("groq-default")
-    expect(DEFAULT_CONFIG.pageTranslation.fallbackProviderIds).toEqual([
-      "google-default",
-      "openrouter-default",
-    ])
+    expect(DEFAULT_CONFIG.pageTranslation.providerId).toBe("microsoft-translate-default")
+    expect(DEFAULT_CONFIG.pageTranslation.fallbackProviderIds).toEqual([])
+    expect(DEFAULT_CONFIG.pageTranslation.microsoftGoogleFallback).toBe(false)
     expect(DEFAULT_CONFIG.selectionToolbar.features.translate.providerId).toBe(
       "groq-default",
     )
@@ -166,13 +164,13 @@ describe("dEFAULT_CONFIG", () => {
       providerId: "groq-default",
     })
     expect(config.selectionToolbar.customActions).toEqual([])
-    // Fresh AI-only defaults route all translation features through Groq with fallback chain.
+    // Webpage translation defaults to Microsoft Translate; AI-only features default to Groq.
+    expect(config.pageTranslation.providerId).toBe("microsoft-translate-default")
     expect([
-      config.pageTranslation.providerId,
       config.selectionToolbar.features.translate.providerId,
       config.inputTranslation.providerId,
       config.videoSubtitles.providerId,
-    ]).toEqual(Array.from({ length: 4 }, () => "groq-default"))
+    ]).toEqual(Array.from({ length: 3 }, () => "groq-default"))
     expect(config.selectionToolbar.noteSuggestion.providerId).toBe(
       DEFAULT_CONFIG.selectionToolbar.noteSuggestion.providerId,
     )

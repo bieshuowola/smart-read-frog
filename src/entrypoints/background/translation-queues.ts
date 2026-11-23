@@ -9,18 +9,20 @@ import type { PromptResolver } from "@/utils/host/translate/api/ai"
 import type { SerializableProviderRef } from "@/utils/providers/provider-ref"
 import { LANGUAGE_ENGLISH_NAMES } from "@read-frog/definitions"
 import { storage } from "#imports"
-import { isLLMProviderConfig } from "@/types/config/provider"
+import { isLLMProviderConfig, isNonAPIProvider } from "@/types/config/provider"
 import { putBatchRequestRecord } from "@/utils/batch-request-record"
 import { CONFIG_STORAGE_KEY, DEFAULT_CONFIG } from "@/utils/constants/config"
 import { BATCH_SEPARATOR, BATCH_SEPARATOR_LINE_PATTERN } from "@/utils/constants/prompt"
+import { DEFAULT_PROVIDER_CONFIG } from "@/utils/constants/providers"
 import { BATCH_TIMEOUT_PER_CHAR_MS, MAX_BATCH_EXTRA_TIMEOUT_MS } from "@/utils/constants/translate"
 import { getRandomUUID } from "@/utils/crypto-polyfill"
 import { Sha256Hex } from "@/utils/hash"
+import { executeMicrosoftBatchTranslate, executeTranslate } from "@/utils/host/translate/execute-translate"
 import { requireHostedFeature } from "@/utils/hosted-ai/routing"
 import { createLogger } from "@/utils/logging/logger"
 import { getSubtitlesTranslatePrompt } from "@/utils/prompts/subtitles"
 import { getTranslatePrompt } from "@/utils/prompts/translate"
-import { BatchQueue } from "@/utils/request/batch-queue"
+import { BatchQueue, PartialBatchOutcomesError } from "@/utils/request/batch-queue"
 import { CancelledScopeRegistry, isTranslationCancelledError } from "@/utils/request/cancellation"
 import { RequestQueue } from "@/utils/request/request-queue"
 import { executeTranslateWithFailover } from "@/utils/smart-translate/ai-failover"
@@ -492,6 +494,213 @@ const selectWebPageQueueConfig = (config: Config) => ({
   batchQueueConfig: config.pageTranslation.batchQueueConfig,
 })
 
+export const MT_REQUEST_QUEUE_OPTIONS = {
+  rate: 8,
+  capacity: 8,
+  timeoutMs: 12_000,
+  maxRetries: 2,
+  baseRetryDelayMs: 600,
+} as const
+
+export const MT_BATCH_QUEUE_OPTIONS = {
+  maxCharactersPerBatch: 4500,
+  maxItemsPerBatch: 20,
+  batchDelay: 30,
+  maxRetries: 2,
+  enableFallbackToIndividual: true,
+} as const
+
+/**
+ * Execute a non-API machine translation task (Microsoft or Google).
+ * If Microsoft fails and `pageTranslation.microsoftGoogleFallback` is enabled by the user,
+ * falls back once to Google Translate without ever invoking AI or paid services.
+ */
+export async function executeMachineTranslationWithFallback(
+  text: string,
+  langConfig: Config["language"],
+  provider: ProviderConfig,
+  options?: {
+    textFormat?: import("@/types/config/translate").TranslationTextFormat
+    preserveLineBreaks?: boolean
+    signal?: AbortSignal
+  },
+): Promise<string> {
+  try {
+    return await executeTranslate(text, langConfig, provider, getTranslatePrompt, options)
+  } catch (error) {
+    if (
+      provider.provider !== "microsoft-translate" ||
+      options?.signal?.aborted ||
+      isTranslationCancelledError(error)
+    ) {
+      throw error
+    }
+    const config = await storage.getItem<Config>(`local:${CONFIG_STORAGE_KEY}`).catch(() => null)
+    if (!config?.pageTranslation?.microsoftGoogleFallback) {
+      throw error
+    }
+    log.warn("Microsoft Translate failed; attempting user-enabled Google Translate fallback", {
+      error,
+    })
+    return await executeTranslate(
+      text,
+      langConfig,
+      DEFAULT_PROVIDER_CONFIG["google-translate"],
+      getTranslatePrompt,
+      options,
+    )
+  }
+}
+
+export async function executeMicrosoftBatchWithFallback(
+  dataList: TranslateBatchData[],
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const first = dataList[0]!
+  const provider = getLocalProviderConfig(first.provider)
+  if (provider?.provider !== "microsoft-translate") {
+    throw new Error("executeMicrosoftBatchWithFallback requires microsoft-translate provider")
+  }
+  const texts = dataList.map((d) => d.text)
+
+  try {
+    if (typeof executeMicrosoftBatchTranslate === "function") {
+      return await executeMicrosoftBatchTranslate(texts, first.langConfig, provider, { signal })
+    }
+    return await Promise.all(
+      texts.map((text) =>
+        executeTranslate(text, first.langConfig, provider, getTranslatePrompt, {
+          textFormat: "plain",
+          signal,
+        }),
+      ),
+    )
+  } catch (error) {
+    if (signal?.aborted || isTranslationCancelledError(error)) {
+      throw error
+    }
+    const config = await storage.getItem<Config>(`local:${CONFIG_STORAGE_KEY}`).catch(() => null)
+    if (!config?.pageTranslation?.microsoftGoogleFallback) {
+      throw error
+    }
+    log.warn("Microsoft native batch failed; falling back to Google Translate", {
+      count: texts.length,
+      error,
+    })
+    return await Promise.all(
+      texts.map((text) =>
+        executeTranslate(
+          text,
+          first.langConfig,
+          DEFAULT_PROVIDER_CONFIG["google-translate"],
+          getTranslatePrompt,
+          { textFormat: "plain", signal },
+        ),
+      ),
+    )
+  }
+}
+
+export function isNonAPIMachineProvider(provider: QueuedTranslationProvider): boolean {
+  const local = getLocalProviderConfig(provider)
+  return Boolean(local && isNonAPIProvider(local.provider))
+}
+
+function isRateLimitError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false
+  const status = "status" in error ? Number((error as { status?: unknown }).status) : NaN
+  if (status === 429) return true
+  const msg = "message" in error ? String((error as { message?: unknown }).message) : ""
+  return msg.includes("429")
+}
+
+async function tryMicrosoftSliceOnce(slice: TranslateBatchData[]) {
+  try {
+    const values = await executeMicrosoftBatchWithFallback(
+      slice,
+      AbortSignal.timeout(MT_REQUEST_QUEUE_OPTIONS.timeoutMs),
+    )
+    if (values.length !== slice.length) {
+      return {
+        ok: false as const,
+        error: new Error(`Batch count mismatch during isolation: ${values.length}/${slice.length}`),
+      }
+    }
+    return { ok: true as const, values }
+  } catch (error) {
+    return { ok: false as const, error }
+  }
+}
+
+async function isolatePartialMicrosoftBatch(
+  dataList: TranslateBatchData[],
+  initialError: unknown,
+  isCancelled: () => boolean,
+): Promise<string[]> {
+  if (
+    dataList.length <= 1 ||
+    isCancelled() ||
+    isTranslationCancelledError(initialError) ||
+    isRateLimitError(initialError)
+  ) {
+    throw initialError
+  }
+
+  const bisectSlice = async (
+    slice: TranslateBatchData[],
+    stopWhenBothFail: boolean,
+  ): Promise<Array<PromiseSettledResult<string>>> => {
+    if (isCancelled()) throw initialError
+    const mid = Math.ceil(slice.length / 2)
+    const leftSlice = slice.slice(0, mid)
+    const rightSlice = slice.slice(mid)
+    const [leftRes, rightRes] = await Promise.all([
+      tryMicrosoftSliceOnce(leftSlice),
+      tryMicrosoftSliceOnce(rightSlice),
+    ])
+
+    if (
+      (!leftRes.ok && (isTranslationCancelledError(leftRes.error) || isRateLimitError(leftRes.error))) ||
+      (!rightRes.ok && (isTranslationCancelledError(rightRes.error) || isRateLimitError(rightRes.error)))
+    ) {
+      throw !leftRes.ok ? leftRes.error : rightRes.error
+    }
+
+    if (stopWhenBothFail && !leftRes.ok && !rightRes.ok) {
+      throw initialError
+    }
+
+    const resolveHalf = async (
+      half: TranslateBatchData[],
+      res: Awaited<ReturnType<typeof tryMicrosoftSliceOnce>>,
+    ): Promise<Array<PromiseSettledResult<string>>> => {
+      if (res.ok) {
+        return res.values.map((value) => ({ status: "fulfilled" as const, value }))
+      }
+      if (half.length <= 1) {
+        return [{ status: "rejected" as const, reason: res.error }]
+      }
+      return bisectSlice(half, false)
+    }
+
+    const [leftOutcomes, rightOutcomes] = await Promise.all([
+      resolveHalf(leftSlice, leftRes),
+      resolveHalf(rightSlice, rightRes),
+    ])
+    return [...leftOutcomes, ...rightOutcomes]
+  }
+
+  const isFulfilled = (
+    outcome: PromiseSettledResult<string>,
+  ): outcome is PromiseFulfilledResult<string> => outcome.status === "fulfilled"
+
+  const combined = await bisectSlice(dataList, true)
+  if (combined.every(isFulfilled)) {
+    return combined.map((o) => o.value)
+  }
+  throw new PartialBatchOutcomesError(combined)
+}
+
 export function createWebPageTranslationQueues() {
   // Scopes whose cancel already drained the queues. Consulted by (a) the
   // enqueue handler after its cache-lookup await and (b) the batch queue's
@@ -502,16 +711,90 @@ export function createWebPageTranslationQueues() {
 
   const webPromptResolver: PromptResolver<WebPagePromptContext> = getTranslatePrompt
 
+  // Dedicated high-speed machine translation queue for Microsoft / Google Translate.
+  // Isolated from LLM queue throttling (e.g. Gemini 15 RPM) so webpage translation
+  // delivers near-instant visible results while batching Microsoft native arrays.
+  const mtRequestQueue = new RequestQueue({
+    rate: MT_REQUEST_QUEUE_OPTIONS.rate,
+    capacity: MT_REQUEST_QUEUE_OPTIONS.capacity,
+    timeoutMs: MT_REQUEST_QUEUE_OPTIONS.timeoutMs,
+    maxRetries: MT_REQUEST_QUEUE_OPTIONS.maxRetries,
+    baseRetryDelayMs: MT_REQUEST_QUEUE_OPTIONS.baseRetryDelayMs,
+  })
+  const mtBatchQueue = new BatchQueue<TranslateBatchData, string>({
+    maxCharactersPerBatch: MT_BATCH_QUEUE_OPTIONS.maxCharactersPerBatch,
+    maxItemsPerBatch: MT_BATCH_QUEUE_OPTIONS.maxItemsPerBatch,
+    batchDelay: MT_BATCH_QUEUE_OPTIONS.batchDelay,
+    maxRetries: MT_BATCH_QUEUE_OPTIONS.maxRetries,
+    enableFallbackToIndividual: MT_BATCH_QUEUE_OPTIONS.enableFallbackToIndividual,
+    dispatchGate: { nextDispatchEtaMs: () => mtRequestQueue.nextDispatchEtaMs() },
+    getBatchKey: (data) => {
+      const local = getLocalProviderConfig(data.provider)
+      return Sha256Hex(
+        `mt-${data.langConfig.sourceCode}-${data.langConfig.targetCode}-${local?.id ?? ""}`,
+      )
+    },
+    getCharacters: (data) => data.text.length,
+    getDedupKey: (data) => data.hash,
+    getScope: (data) => data.scope,
+    isScopeCancelled: (scopeKey) => cancelledScopes.has(scopeKey),
+    executeBatch: async (dataList, meta) => {
+      const hash = Sha256Hex("mt-batch", ...dataList.map((d) => d.hash))
+      const earliestScheduleAt = Math.min(...dataList.map((d) => d.scheduleAt))
+      try {
+        return await mtRequestQueue.enqueue(
+          (signal) => executeMicrosoftBatchWithFallback(dataList, signal),
+          earliestScheduleAt,
+          hash,
+          meta.scopes,
+        )
+      } catch (error) {
+        const isCancelled = () =>
+          Boolean(meta.scopes?.length && meta.scopes.every((scope) => cancelledScopes.has(scope)))
+        return await isolatePartialMicrosoftBatch(dataList, error, isCancelled)
+      }
+    },
+    executeIndividual: async (data) => {
+      const local = getLocalProviderConfig(data.provider)
+      if (!local) throw new Error("Invalid local machine translation provider")
+      return mtRequestQueue.enqueue(
+        (signal) =>
+          executeMachineTranslationWithFallback(data.text, data.langConfig, local, {
+            textFormat: "plain",
+            signal,
+          }),
+        data.scheduleAt,
+        data.hash,
+        data.scope ? [data.scope] : undefined,
+      )
+    },
+    onError: (error, context) => {
+      if (isTranslationCancelledError(error)) return
+      log.warn("Machine translation batch request failed", {
+        error,
+        batchKey: context.batchKey.slice(0, 12),
+        retry: context.retryCount,
+        isFallback: context.isFallback,
+      })
+    },
+  })
+
   const queuesPromise = loadQueueSetupConfig("webpage", selectWebPageQueueConfig).then(
-    ({ requestQueueConfig, batchQueueConfig, configSource }) =>
-      createTranslationQueues<WebPagePromptContext>({
+    async ({ requestQueueConfig, batchQueueConfig, configSource }) => {
+      const llmQueues = await createTranslationQueues<WebPagePromptContext>({
         requestQueueConfig,
         batchQueueConfig,
         promptResolver: webPromptResolver,
         isScopeCancelled: (scopeKey) => cancelledScopes.has(scopeKey),
         queueName: "webpage",
         configSource,
-      }),
+      })
+      return {
+        ...llmQueues,
+        mtRequestQueue,
+        mtBatchQueue,
+      }
+    },
   )
 
   watchQueueConfig("webpage", queuesPromise, selectWebPageQueueConfig)

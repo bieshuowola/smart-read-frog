@@ -5,7 +5,10 @@ import { configSchema } from "@/types/config/config"
 import { isAPIProviderConfig } from "@/types/config/provider"
 import { initI18n } from "@/utils/i18n"
 import { createLogger } from "@/utils/logging/logger"
-import { repairDeprecatedFreeDefaults } from "@/utils/smart-translate/config-upgrade"
+import {
+  repairDeprecatedFreeDefaults,
+  upgradePageTranslationToMicrosoftDefault,
+} from "@/utils/smart-translate/config-upgrade"
 import {
   buildFreshDefaultConfig,
   CONFIG_SCHEMA_VERSION,
@@ -64,6 +67,10 @@ export async function initializeConfig(): Promise<InitializeConfigResult> {
     }
   }
 
+  const hadMicrosoftUpgradeMarker =
+    typeof (storedConfig as { pageTranslation?: { microsoftGoogleFallback?: unknown } } | null)
+      ?.pageTranslation?.microsoftGoogleFallback === "boolean"
+
   const parsedConfig = configSchema.safeParse(config)
   if (parsedConfig.success) {
     // Stored as every reader gets it: defaults filled in, the selection
@@ -72,6 +79,14 @@ export async function initializeConfig(): Promise<InitializeConfigResult> {
     const upgradeResult = repairDeprecatedFreeDefaults(config)
     config = upgradeResult.config
     didConfigChange = didConfigChange || upgradeResult.changed
+
+    if (!isFreshInstall) {
+      const msUpgradeResult = upgradePageTranslationToMicrosoftDefault(config, {
+        alreadyMigrated: hadMicrosoftUpgradeMarker,
+      })
+      config = msUpgradeResult.config
+      didConfigChange = didConfigChange || msUpgradeResult.changed
+    }
   } else {
     log.warn("Config is invalid, using default config")
     await initI18n(DEFAULT_CONFIG.uiLanguage)

@@ -9,6 +9,10 @@ import {
   PARAGRAPH_ATTRIBUTE,
   TRANSLATION_ERROR_CONTAINER_CLASS,
 } from "@/utils/constants/dom-labels"
+import {
+  beginPageTranslationSession,
+  getPageTranslationFailureSummary,
+} from "../../translation-session"
 import { removeAllTranslatedWrapperNodes } from "../../dom/translation-cleanup"
 import { translateNodesBilingualMode } from "../translation-modes"
 import {
@@ -66,6 +70,7 @@ function tamperWrapper(wrapper: HTMLElement, text: string): void {
 
 describe("bilingual wrapper tamper recovery (#1918)", () => {
   beforeEach(() => {
+    beginPageTranslationSession()
     document.body.replaceChildren()
     mockDecorateTranslationNode.mockReset().mockResolvedValue(undefined)
     mockShouldFilterSmallParagraph.mockReset().mockResolvedValue(false)
@@ -190,18 +195,17 @@ describe("bilingual wrapper tamper recovery (#1918)", () => {
     expect(getBilingualTranslationStateForSource(source)).toBeUndefined()
   })
 
-  it("keeps the snapshot null on the provider-error path", async () => {
+  it("removes empty wrapper and keeps zero inline error UI while recording failure centrally", async () => {
     const source = createSource()
     mockTranslateTextForPage.mockRejectedValue(new Error("provider down"))
 
     await translateNodesBilingualMode([source], "walk-1", DEFAULT_CONFIG)
 
-    const wrapper = getWrapper(source)
-    expect(wrapper.querySelector(`.${TRANSLATION_ERROR_CONTAINER_CLASS}`)).not.toBeNull()
-    const state = getBilingualTranslationStateForSource(source)!
-    expect(state.wrapperTextContent).toBeNull()
-    // Error-host churn inside the wrapper keeps its pre-#1918 classification.
-    expect(isBilingualTranslationStateCurrent(state)).toBe(true)
+    expect(source.querySelector(`.${TRANSLATION_ERROR_CONTAINER_CLASS}`)).toBeNull()
+    expect(source.querySelector(`.${CONTENT_WRAPPER_CLASS}`)).toBeNull()
+    expect(getBilingualTranslationStateForSource(source)).toBeUndefined()
+    expect(source.textContent).toBe("English source title")
+    expect(getPageTranslationFailureSummary().failedCount).toBe(1)
   })
 })
 

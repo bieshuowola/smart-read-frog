@@ -3,11 +3,12 @@ import type { Config } from "@/types/config/config"
 import type { TranslationMode } from "@/types/config/translate"
 import type { TransNode } from "@/types/dom"
 import { createLogger } from "@/utils/logging/logger"
+import { resolvePageTranslationProviderOrNull } from "@/utils/providers/provider-ref"
+import { isTranslationCancelledError } from "@/utils/request/cancellation"
 import {
   CONTENT_WRAPPER_CLASS,
   NOTRANSLATE_CLASS,
   PARAGRAPH_ATTRIBUTE,
-  TRANSLATION_ERROR_CONTAINER_CLASS,
   TRANSLATION_MODE_ATTRIBUTE,
   TRANSLATION_ONLY_ATTRIBUTE,
   VIRTUAL_PARAGRAPH_ATTRIBUTE,
@@ -20,7 +21,10 @@ import {
 import { batchDOMOperation } from "../../dom/batch-dom"
 import {
   isBlockTransNode,
+  isDontWalkIntoAndDontTranslateAsChildElement,
+  isDontWalkIntoButTranslateAsChildElement,
   isHTMLElement,
+  isInlineAtomElement,
   isNaturalBlockTransNode,
   isSiteRuleForceBlockStyleElement,
   isTextNode,
@@ -46,6 +50,10 @@ import {
   restoreTranslationOnlySwapsForAnchor,
   teardownVirtualTranslationOnlyGeneration,
 } from "../dom/translation-cleanup"
+import {
+  TRANSLATABLE_ATTRIBUTE_NAMES,
+  TRANSLATABLE_INPUT_VALUE_TYPES,
+} from "../dom/translation-html-attributes"
 import { insertTranslatedNodeIntoWrapper } from "../dom/translation-insertion"
 import {
   applyInPlaceTextSwap,
@@ -53,6 +61,8 @@ import {
   planInPlaceTextSwap,
   snapshotSourceTextNodes,
   verifySourceSnapshot,
+  type AttributeSwapPair,
+  type TextSwapPair,
 } from "../dom/translation-text-swap"
 import { findPreviousTranslatedWrapperInside } from "../dom/translation-wrapper"
 import {
@@ -62,7 +72,16 @@ import {
 import { diagnoseParagraph, settleDisplayedTranslation } from "../paragraph-diagnosis"
 import { translateTextForPage } from "../translate-variants"
 import { setTranslationDirAndLang } from "../translation-attributes"
+import {
+  clearPageTranslationNodeFailed,
+  decrementInFlightPageTranslation,
+  getPriorityScheduleAtForNodes,
+  incrementInFlightPageTranslation,
+  reportPageTranslationNodeFailed,
+  reportPageTranslationRequestFailed,
+} from "../translation-session"
 import { createSpinnerInside, getTranslatedTextAndRemoveSpinner } from "../ui/spinner"
+import { findCompactInteractiveHost, isNumericContent } from "../ui/translation-utils"
 import {
   createPageTranslationRequest,
   getPageTranslationSkipReason,
@@ -98,6 +117,226 @@ const log = createLogger("host/translate/core/translation-modes")
 
 let virtualParagraphGroupSequence = 0
 let virtualTranslationOnlyGenerationSequence = 0
+
+function collectTranslatableSwapTargets(
+  nodes: readonly TransNode[],
+  config: Config,
+): {
+  textNodes: Text[]
+  attributes: Array<{ element: Element; name: string; value: string }>
+} {
+  const textNodes: Text[] = []
+  const attributes: Array<{ element: Element; name: string; value: string }> = []
+  const seenElements = new Set<Element>()
+
+  const visit = (node: Node) => {
+    if (isTextNode(node)) {
+      if (node.data.trim()) textNodes.push(node)
+      return
+    }
+    if (!isHTMLElement(node)) return
+    if (
+      node.classList.contains(CONTENT_WRAPPER_CLASS) ||
+      node.classList.contains(NOTRANSLATE_CLASS)
+    ) {
+      return
+    }
+    if (isDontWalkIntoAndDontTranslateAsChildElement(node, config)) return
+    if (isDontWalkIntoButTranslateAsChildElement(node, config)) return
+    if (isInlineAtomElement(node, config)) return
+
+    if (!seenElements.has(node)) {
+      seenElements.add(node)
+      for (const name of TRANSLATABLE_ATTRIBUTE_NAMES) {
+        const val = node.getAttribute(name)
+        if (val?.trim() && !isNumericContent(val)) {
+          attributes.push({ element: node, name, value: val })
+        }
+      }
+      if (
+        node.localName === "input" &&
+        TRANSLATABLE_INPUT_VALUE_TYPES.has((node.getAttribute("type") ?? "").toLowerCase())
+      ) {
+        const val = node.getAttribute("value")
+        if (val?.trim() && !isNumericContent(val)) {
+          attributes.push({ element: node, name: "value", value: val })
+        }
+      }
+    }
+
+    for (const child of node.childNodes) {
+      visit(child)
+    }
+  }
+
+  for (const node of nodes) {
+    visit(node)
+  }
+
+  return { textNodes, attributes }
+}
+
+/**
+ * Shared plain-text in-place translation & atomic DOM swap helper.
+ * Used for both compact UI controls in bilingual mode and Microsoft Translate
+ * in translationOnly mode (since Microsoft has no markup-preserving endpoint).
+ */
+async function translateAndSwapInPlacePlain(options: {
+  nodes: ChildNode[]
+  transNodes: TransNode[]
+  anchor: HTMLElement
+  walkId: string
+  config: Config
+  preserveLineBreaks: boolean
+  forceRetranslation: boolean
+  isCurrent: () => boolean
+  diagnosis: ReturnType<typeof diagnoseParagraph>
+  includeAttributes?: boolean
+  originalTitleTooltip?: { element: HTMLElement; originalText: string }
+  swapAnchorToCleanup?: HTMLElement | null
+}): Promise<void> {
+  const {
+    nodes,
+    transNodes,
+    anchor,
+    walkId,
+    config,
+    preserveLineBreaks,
+    forceRetranslation,
+    isCurrent,
+    diagnosis,
+    includeAttributes = true,
+    originalTitleTooltip,
+    swapAnchorToCleanup,
+  } = options
+
+  const targets = collectTranslatableSwapTargets(transNodes, config)
+  if (targets.textNodes.length === 0 && (!includeAttributes || targets.attributes.length === 0)) {
+    diagnosis.untranslated("noProse")
+    return
+  }
+
+  const sourceSnapshot = snapshotSourceTextNodes(transNodes)
+  const scheduleAt = getPriorityScheduleAtForNodes(nodes)
+
+  incrementInFlightPageTranslation()
+  try {
+    const textPairs: TextSwapPair[] = []
+    const attributePairs: AttributeSwapPair[] = []
+    let hadFailure = false
+    let firstFailureError: unknown = null
+
+    const textResults = await Promise.allSettled(
+      targets.textNodes.map(async (textNode) => {
+        const raw = textNode.data
+        const leading = raw.match(/^\s*/)?.[0] ?? ""
+        const trailing = raw.match(/\s*$/)?.[0] ?? ""
+        const core = raw.slice(leading.length, raw.length - trailing.length)
+        if (!core || isNumericContent(core)) {
+          return { textNode, translatedValue: raw }
+        }
+        const translated = await translateTextForPage(core, "plain", {
+          preserveLineBreaks,
+          forceRetranslation,
+          diagnosis,
+          scheduleAt,
+        })
+        if (!translated.trim()) {
+          return { textNode, translatedValue: raw }
+        }
+        return { textNode, translatedValue: `${leading}${translated}${trailing}` }
+      }),
+    )
+
+    for (let i = 0; i < textResults.length; i++) {
+      const res = textResults[i]!
+      if (res.status === "fulfilled") {
+        const { textNode, translatedValue } = res.value
+        if (translatedValue !== textNode.data) {
+          textPairs.push({ node: textNode, translatedValue })
+        }
+      } else {
+        if (isTranslationCancelledError(res.reason)) return
+        hadFailure = true
+        firstFailureError ??= res.reason
+      }
+    }
+
+    if (includeAttributes && targets.attributes.length > 0) {
+      const attrResults = await Promise.allSettled(
+        targets.attributes.map(async (attr) => {
+          const translated = await translateTextForPage(attr.value, "plain", {
+            forceRetranslation,
+            scheduleAt,
+          })
+          return { ...attr, translatedValue: translated.trim() || attr.value }
+        }),
+      )
+      for (const res of attrResults) {
+        if (res.status === "fulfilled") {
+          const { element, name, value, translatedValue } = res.value
+          if (translatedValue !== value) {
+            attributePairs.push({ element, name, translatedValue })
+          }
+        } else if (!isTranslationCancelledError(res.reason)) {
+          hadFailure = true
+          firstFailureError ??= res.reason
+        }
+      }
+    }
+
+    if (!isCurrent()) return
+
+    if (hadFailure && textPairs.length === 0 && attributePairs.length === 0) {
+      diagnosis.untranslated("error", { error: firstFailureError })
+      reportPageTranslationRequestFailed(firstFailureError)
+      reportPageTranslationNodeFailed(nodes, firstFailureError)
+      return
+    }
+
+    if (hadFailure) {
+      reportPageTranslationNodeFailed(nodes, firstFailureError)
+    } else {
+      clearPageTranslationNodeFailed(nodes)
+    }
+
+    if (textPairs.length === 0 && attributePairs.length === 0) {
+      diagnosis.untranslated("noTranslationNeeded")
+      return
+    }
+
+    if (
+      originalTitleTooltip?.element.getAttribute("title") === null &&
+      originalTitleTooltip.originalText.trim()
+    ) {
+      attributePairs.push({
+        element: originalTitleTooltip.element,
+        name: "title",
+        translatedValue: originalTitleTooltip.originalText.trim(),
+      })
+    }
+
+    const plan = { pairs: textPairs, attributePairs, coverage: 1 }
+    batchDOMOperation(() => {
+      if (!isCurrent()) return
+      if (!verifySourceSnapshot(transNodes, sourceSnapshot)) return
+      applyInPlaceTextSwap(
+        plan,
+        transNodes,
+        anchor,
+        walkId,
+        config,
+        getTranslationOnlyAnchorState,
+      )
+      if (swapAnchorToCleanup && swapAnchorToCleanup !== anchor) {
+        dropTranslationOnlySwapRecordsForNodes(swapAnchorToCleanup, transNodes)
+      }
+      diagnosis.translated()
+    })
+  } finally {
+    decrementInFlightPageTranslation()
+  }
+}
 
 function createBilingualWrapper(
   ownerDoc: Document,
@@ -157,6 +396,7 @@ async function translateVirtualParagraph(
   if (!isCurrent()) return
 
   const diagnosis = diagnoseVirtualParagraphUnit(group.layoutSource, unit)
+  const scheduleAt = getPriorityScheduleAtForNodes(nodes)
   const realTranslatedText = await getTranslatedTextAndRemoveSpinner(
     nodes,
     unit.text,
@@ -171,6 +411,7 @@ async function translateVirtualParagraph(
         preserveLineBreaks: true,
         forceRetranslation,
         diagnosis,
+        scheduleAt,
       }),
     diagnosis,
   )
@@ -181,14 +422,8 @@ async function translateVirtualParagraph(
 
   const translatedText = getDisplayTranslation(unit.text, realTranslatedText)
   settleDisplayedTranslation(diagnosis, realTranslatedText, translatedText)
-  if (translatedText === "") {
+  if (translatedText === "" || translatedText === undefined) {
     dropVirtualParagraphWrapper(group, wrapper)
-    return
-  }
-  if (translatedText === undefined) {
-    if (!wrapper.querySelector(`.${TRANSLATION_ERROR_CONTAINER_CLASS}`)) {
-      dropVirtualParagraphWrapper(group, wrapper)
-    }
     return
   }
 
@@ -518,6 +753,34 @@ export async function translateNodesBilingualMode(
       return
     }
 
+    // Compact interactive UI elements (buttons, tabs, navigation links, menu items, badges)
+    // translate cleanly in-place even in bilingual mode so fixed heights and toolbars never break.
+    const compactHost =
+      !toggle && !forceBlockTranslation && atomExtraction.atoms.length === 0
+        ? findCompactInteractiveHost(transNodes, requestText)
+        : null
+    if (
+      compactHost &&
+      !compactHost.hasAttribute(TRANSLATION_ONLY_ATTRIBUTE) &&
+      !compactHost.querySelector(`.${CONTENT_WRAPPER_CLASS}`)
+    ) {
+      if (bilingualState) unregisterBilingualTranslationState(bilingualState)
+      await translateAndSwapInPlacePlain({
+        nodes,
+        transNodes,
+        anchor: compactHost,
+        walkId,
+        config,
+        preserveLineBreaks: false,
+        forceRetranslation,
+        isCurrent: () => transNodes.every((n) => n.isConnected),
+        diagnosis,
+        includeAttributes: false,
+        originalTitleTooltip: { element: compactHost, originalText: requestText },
+      })
+      return
+    }
+
     const ownerDoc = getOwnerDocument(insertionTarget)
     const { spinner, wrapper: translatedWrapperNode } = createBilingualWrapper(
       ownerDoc,
@@ -574,11 +837,13 @@ export async function translateNodesBilingualMode(
         ? layoutSource
         : layoutSource.parentElement
     const preserveLineBreaks = flowContainer ? isNewlinePreservingElement(flowContainer) : false
+    const scheduleAt = getPriorityScheduleAtForNodes(nodes)
 
     const request = createPageTranslationRequest(atomExtraction, config, "plain", {
       preserveLineBreaks,
       forceRetranslation,
       diagnosis,
+      scheduleAt,
     })
     const realTranslatedText = await getTranslatedTextAndRemoveSpinner(
       nodes,
@@ -600,14 +865,8 @@ export async function translateNodesBilingualMode(
     const translatedText = request.getDisplayText(realTranslatedText)
     settleDisplayedTranslation(diagnosis, realTranslatedText, translatedText)
 
-    if (translatedText === "") {
+    if (translatedText === "" || translatedText === undefined) {
       removeTranslatedWrapperWithRestore(translatedWrapperNode)
-      return
-    }
-    if (translatedText === undefined) {
-      if (!translatedWrapperNode.querySelector(`.${TRANSLATION_ERROR_CONTAINER_CLASS}`)) {
-        removeTranslatedWrapperWithRestore(translatedWrapperNode)
-      }
       return
     }
 
@@ -1031,7 +1290,28 @@ async function translateTranslationOnlyRun(
       return
     }
 
+    const resolvedProvider = resolvePageTranslationProviderOrNull(config)
+    const isMicrosoftProvider =
+      resolvedProvider?.kind === "local" && resolvedProvider.config.provider === "microsoft-translate"
+    if (isMicrosoftProvider) {
+      await translateAndSwapInPlacePlain({
+        nodes,
+        transNodes,
+        anchor: parentNode,
+        walkId,
+        config,
+        preserveLineBreaks: isNewlinePreservingElement(parentNode),
+        forceRetranslation,
+        isCurrent,
+        diagnosis,
+        includeAttributes: true,
+        swapAnchorToCleanup: swapAnchor,
+      })
+      return
+    }
+
     const ownerDoc = getOwnerDocument(targetNode)
+    const scheduleAt = getPriorityScheduleAtForNodes(nodes)
     // The translation is swapped into the run's own text nodes, so their
     // parent's white-space decides whether single newlines render — a
     // text/plain page's <pre>, a GameFAQs guide, an X tweet. Without the flag
@@ -1040,6 +1320,7 @@ async function translateTranslationOnlyRun(
       preserveLineBreaks: isNewlinePreservingElement(parentNode),
       forceRetranslation,
       diagnosis,
+      scheduleAt,
     })
     if (!request.sourceText) {
       diagnosis.untranslated("noProse")
@@ -1088,13 +1369,9 @@ async function translateTranslationOnlyRun(
     // host may change the run before they run, and then the original stays.
     if (!translatedText) {
       settleDisplayedTranslation(diagnosis, realTranslatedText, translatedText)
-      // Keep the wrapper when translation failed so the injected error UI remains visible.
-      // Only remove the wrapper when translation returned an empty string.
-      if (translatedText === "") {
-        markExtensionDrivenNodeRemoval(translatedWrapperNode)
-        // Batch the remove operation to execute remove operation after insert operation
-        batchDOMOperation(() => translatedWrapperNode.remove())
-      }
+      markExtensionDrivenNodeRemoval(translatedWrapperNode)
+      // Batch the remove operation to execute remove operation after insert operation
+      batchDOMOperation(() => translatedWrapperNode.remove())
       return
     }
 

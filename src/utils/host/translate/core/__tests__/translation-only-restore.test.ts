@@ -6,6 +6,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { DEFAULT_CONFIG } from "@/utils/constants/config"
 import { CONTENT_WRAPPER_CLASS, TRANSLATION_ONLY_ATTRIBUTE } from "@/utils/constants/dom-labels"
+import { GOOGLE_TRANSLATE_PROVIDER_ID } from "@/utils/constants/providers"
 import { flushBatchedOperations } from "../../../dom/batch-dom"
 import {
   removeAllTranslatedWrapperNodes,
@@ -32,6 +33,14 @@ vi.mock("@/utils/host/translate/translate-variants", () => ({
 vi.mock("@/utils/host/translate/target-language-skip", () => ({
   shouldSkipAsTargetLanguage: mockShouldSkipAsTargetLanguage,
 }))
+
+const HTML_TRANSLATION_ONLY_CONFIG = {
+  ...DEFAULT_CONFIG,
+  pageTranslation: {
+    ...DEFAULT_CONFIG.pageTranslation,
+    providerId: GOOGLE_TRANSLATE_PROVIDER_ID,
+  },
+}
 
 function getWrappers(root: ParentNode = document): HTMLElement[] {
   return [...root.querySelectorAll<HTMLElement>(`.${CONTENT_WRAPPER_CLASS}`)]
@@ -63,9 +72,9 @@ describe("translationOnly node-identity restore (#1846)", () => {
 
     const originalHTML = container.innerHTML
 
-    await translateNodeTranslationOnlyMode([li], "walk-1", DEFAULT_CONFIG)
+    await translateNodeTranslationOnlyMode([li], "walk-1", HTML_TRANSLATION_ONLY_CONFIG)
     flushBatchedOperations()
-    await translateNodeTranslationOnlyMode([introText], "walk-1", DEFAULT_CONFIG)
+    await translateNodeTranslationOnlyMode([introText], "walk-1", HTML_TRANSLATION_ONLY_CONFIG)
     flushBatchedOperations()
 
     // The structural li run falls back to a wrapper (plain-text mock can't be
@@ -92,7 +101,7 @@ describe("translationOnly node-identity restore (#1846)", () => {
     container.append(spanA, textB)
     document.body.append(container)
 
-    await translateNodeTranslationOnlyMode([spanA, textB], "walk-1", DEFAULT_CONFIG)
+    await translateNodeTranslationOnlyMode([spanA, textB], "walk-1", HTML_TRANSLATION_ONLY_CONFIG)
     flushBatchedOperations()
     expect(container.contains(spanA)).toBe(false)
 
@@ -180,7 +189,7 @@ describe("translationOnly node-identity restore (#1846)", () => {
       }),
     )
 
-    const translation = translateNodeTranslationOnlyMode([p], "walk-1", DEFAULT_CONFIG)
+    const translation = translateNodeTranslationOnlyMode([p], "walk-1", HTML_TRANSLATION_ONLY_CONFIG)
     await vi.waitFor(() =>
       expect(getWrappers(p).length + getWrappers(document).length).toBeGreaterThan(0),
     )
@@ -205,7 +214,7 @@ describe("translationOnly node-identity restore (#1846)", () => {
     p.append(bold, document.createTextNode(" tail text"))
     document.body.append(p)
 
-    await translateNodeTranslationOnlyMode([p], "walk-1", DEFAULT_CONFIG)
+    await translateNodeTranslationOnlyMode([p], "walk-1", HTML_TRANSLATION_ONLY_CONFIG)
     flushBatchedOperations()
 
     const wrapper = getWrappers(p)[0]
@@ -294,7 +303,7 @@ describe("translationOnly node-identity restore (#1846)", () => {
       }),
     )
 
-    const translation = translateNodeTranslationOnlyMode([p], "walk-1", DEFAULT_CONFIG)
+    const translation = translateNodeTranslationOnlyMode([p], "walk-1", HTML_TRANSLATION_ONLY_CONFIG)
     // Wait until the request is actually in flight (snapshot already taken),
     // then let the host rewrite the text before the response lands
     await vi.waitFor(() => expect(mockTranslateTextForPage).toHaveBeenCalled())
@@ -319,7 +328,7 @@ describe("translationOnly node-identity restore (#1846)", () => {
     p.append(document.createTextNode("prefix "), link, document.createTextNode(" suffix"))
     document.body.append(p)
 
-    await translateNodeTranslationOnlyMode([p], "walk-1", DEFAULT_CONFIG)
+    await translateNodeTranslationOnlyMode([p], "walk-1", HTML_TRANSLATION_ONLY_CONFIG)
     flushBatchedOperations()
 
     expect(getWrappers().length).toBe(0)
@@ -384,18 +393,18 @@ describe("translationOnly node-identity restore (#1846)", () => {
     const originalHTML = container.innerHTML
 
     // Press 1: translate (walker order — loose run first, then the li)
-    await translateNodeTranslationOnlyMode([introText], "walk-1", DEFAULT_CONFIG)
+    await translateNodeTranslationOnlyMode([introText], "walk-1", HTML_TRANSLATION_ONLY_CONFIG)
     flushBatchedOperations()
-    await translateNodeTranslationOnlyMode([li], "walk-1", DEFAULT_CONFIG)
+    await translateNodeTranslationOnlyMode([li], "walk-1", HTML_TRANSLATION_ONLY_CONFIG)
     flushBatchedOperations()
     expect(mockTranslateTextForPage).toHaveBeenCalledTimes(2)
     expect(container.hasAttribute(TRANSLATION_ONLY_ATTRIBUTE)).toBe(true)
     expect(getWrappers(container).length).toBe(1)
 
     // Press 2 ("hide"): same walker order, fresh walkId, toggle=true
-    await translateNodeTranslationOnlyMode([introText], "walk-2", DEFAULT_CONFIG, true)
+    await translateNodeTranslationOnlyMode([introText], "walk-2", HTML_TRANSLATION_ONLY_CONFIG, true)
     flushBatchedOperations()
-    await translateNodeTranslationOnlyMode([li], "walk-2", DEFAULT_CONFIG, true)
+    await translateNodeTranslationOnlyMode([li], "walk-2", HTML_TRANSLATION_ONLY_CONFIG, true)
     flushBatchedOperations()
 
     expect(container.innerHTML).toBe(originalHTML)

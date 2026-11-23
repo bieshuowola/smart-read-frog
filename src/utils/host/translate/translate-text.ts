@@ -320,6 +320,8 @@ export interface TranslateTextOptions {
   hostedFeature: HostedAiTextStreamRoute
   /** Page translation: told when the answer is empty, and why. */
   diagnosis?: ParagraphDiagnosis
+  /** Optional priority timestamp for queue ordering (lower dispatches sooner). */
+  scheduleAt?: number
 }
 
 /**
@@ -341,6 +343,7 @@ export async function translateTextCore(options: TranslateTextOptions): Promise<
     glossaryEnabled = false,
     hostedFeature,
     diagnosis,
+    scheduleAt,
   } = options
 
   const preparedText = prepareTranslationText(text)
@@ -431,7 +434,7 @@ export async function translateTextCore(options: TranslateTextOptions): Promise<
     text: preparedText,
     langConfig,
     providerRef,
-    scheduleAt: Date.now(),
+    scheduleAt: scheduleAt ?? Date.now(),
     hash,
     textFormat,
     preserveLineBreaks,

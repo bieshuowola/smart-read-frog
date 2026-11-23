@@ -106,6 +106,7 @@ async function translateTextUsingPageConfig(
     sessionId?: string
     forceRetranslation?: boolean
     diagnosis?: ParagraphDiagnosis
+    scheduleAt?: number
   } = {},
 ): Promise<string> {
   const { diagnosis } = options
@@ -150,6 +151,7 @@ async function translateTextUsingPageConfig(
     sessionId: options.sessionId,
     forceRetranslation: options.forceRetranslation,
     diagnosis,
+    scheduleAt: options.scheduleAt,
   })
 }
 
@@ -158,6 +160,7 @@ export interface PageTranslationRequestOptions {
   forceRetranslation?: boolean
   /** Told why the answer is empty, by whichever step made it so. */
   diagnosis?: ParagraphDiagnosis
+  scheduleAt?: number
 }
 
 /**
@@ -190,6 +193,7 @@ export async function translateTextForPage(
     sessionId,
     forceRetranslation: options?.forceRetranslation,
     diagnosis: options?.diagnosis,
+    scheduleAt: options?.scheduleAt,
   })
 }
 

@@ -30,6 +30,7 @@ vi.mock("../translation-queues", () => ({
   buildTranslationScopeKey: () => "7:session",
   getQueuedTranslationRouting: () => ({}),
   getLocalProviderConfig: () => null,
+  isNonAPIMachineProvider: () => false,
   shouldUseBatchQueue: () => true,
 }))
 

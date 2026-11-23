@@ -409,6 +409,7 @@ function cloneConfig(config: Config): Config {
     if (!cloned.providersConfig.some((p) => p.id === GOOGLE_TRANSLATE_PROVIDER_ID)) {
       cloned.providersConfig.push(structuredClone(DEFAULT_PROVIDER_CONFIG["google-translate"]))
     }
+    cloned.selectionToolbar.enabled = true
     cloned.selectionToolbar.features.translate.providerId = GOOGLE_TRANSLATE_PROVIDER_ID
   }
   return cloned

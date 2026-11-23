@@ -79,7 +79,10 @@ function createConfig({
   eagerIframeInjection?: boolean
 } = {}): Config {
   return {
-    selectionToolbar: DEFAULT_CONFIG.selectionToolbar,
+    selectionToolbar: {
+      ...DEFAULT_CONFIG.selectionToolbar,
+      enabled: true,
+    },
     translate: {
       node: {
         enabled: nodeTranslationEnabled,

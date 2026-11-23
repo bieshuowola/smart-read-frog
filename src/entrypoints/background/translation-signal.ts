@@ -231,6 +231,42 @@ export function translationMessage() {
     return DEFAULT_DETECTED_CODE
   })
 
+  onMessage("getPageTranslationDiagnostics", async (msg) => {
+    const explicitTabId = msg.data?.tabId
+    let tabId = typeof explicitTabId === "number" ? explicitTabId : msg.sender?.tab?.id
+    if (typeof tabId !== "number") {
+      const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true })
+      tabId = activeTab?.id
+    }
+    if (typeof tabId !== "number") return null
+    try {
+      return await sendMessage("getPageTranslationDiagnosticsFromTab", undefined, {
+        tabId,
+        frameId: 0,
+      })
+    } catch {
+      return null
+    }
+  })
+
+  onMessage("retryFailedPageTranslations", async (msg) => {
+    const explicitTabId = msg.data?.tabId
+    let tabId = typeof explicitTabId === "number" ? explicitTabId : msg.sender?.tab?.id
+    if (typeof tabId !== "number") {
+      const [activeTab] = await browser.tabs.query({ active: true, currentWindow: true })
+      tabId = activeTab?.id
+    }
+    if (typeof tabId !== "number") return { retriedCount: 0 }
+    try {
+      return await sendMessage("retryFailedPageTranslationsFromTab", undefined, {
+        tabId,
+        frameId: 0,
+      })
+    } catch {
+      return { retriedCount: 0 }
+    }
+  })
+
   onMessage("tryToSetEnablePageTranslationByTabId", async (msg) => {
     const { tabId, enabled, analyticsContext } = msg.data
     if (!enabled) {

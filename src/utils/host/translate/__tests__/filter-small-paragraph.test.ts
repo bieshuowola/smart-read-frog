@@ -4,6 +4,7 @@ import type { Config } from "@/types/config/config"
 import type { SiteRule } from "@/types/config/site-rules"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { DEFAULT_CONFIG } from "@/utils/constants/config"
+import { GOOGLE_TRANSLATE_PROVIDER_ID } from "@/utils/constants/providers"
 import { flushBatchedOperations } from "@/utils/host/dom/batch-dom"
 import { translateNodes } from "../core/translation-modes"
 import { shouldFilterSmallParagraph } from "../filter-small-paragraph"
@@ -21,15 +22,20 @@ function createConfig({
   minCharacters = 0,
   minWords = 0,
   userRules = [],
+  providerId,
 }: {
   mode?: Config["pageTranslation"]["mode"]
   minCharacters?: number
   minWords?: number
   userRules?: SiteRule[]
+  providerId?: string
 } = {}): Config {
   const config = structuredClone(DEFAULT_CONFIG)
   config.language.sourceCode = "en"
   config.pageTranslation.mode = mode
+  if (providerId) {
+    config.pageTranslation.providerId = providerId
+  }
   config.pageTranslation.page.minCharactersPerNode = minCharacters
   config.pageTranslation.page.minWordsPerNode = minWords
   config.siteRules.userRules = userRules
@@ -117,7 +123,11 @@ describe.each(["bilingual", "translationOnly"] as const)("%s translation", (mode
     container.appendChild(textNode)
     document.body.appendChild(container)
 
-    await translateNodes([textNode], "walk-id", false, createConfig({ mode }))
+    const config =
+      mode === "translationOnly"
+        ? createConfig({ mode, providerId: GOOGLE_TRANSLATE_PROVIDER_ID })
+        : createConfig({ mode })
+    await translateNodes([textNode], "walk-id", false, config)
 
     expect(mocks.translateTextForPage).toHaveBeenCalledOnce()
     // Bilingual passes a trailing actionContext/options pair; the

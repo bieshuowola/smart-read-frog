@@ -25,7 +25,6 @@ import { queryClient } from "@/utils/tanstack-query"
 import { applyTheme, getLocalThemeMode, isDarkMode } from "@/utils/theme"
 import App from "./app"
 import { AppShell } from "./app-shell"
-import { SettingsSearch } from "./command-palette/settings-search"
 import { ScrollRestoration } from "./navigation/scroll-restoration"
 import "@fontsource-variable/inter/index.css"
 import "@/assets/styles/theme.css"
@@ -73,7 +72,6 @@ async function initApp() {
                       <AppShell>
                         <App />
                       </AppShell>
-                      <SettingsSearch />
                     </RecoveryBoundary>
                   </AnchoredToastProvider>
                 </ToastProvider>

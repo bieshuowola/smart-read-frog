@@ -29,8 +29,10 @@ import { getOrGenerateTranslationContextSummary } from "./translation-context-su
 import {
   buildTranslationScopeKey,
   createWebPageTranslationQueues,
+  executeMachineTranslationWithFallback,
   getLocalProviderConfig,
   getQueuedTranslationRouting,
+  isNonAPIMachineProvider,
   shouldUseBatchQueue,
 } from "./translation-queues"
 
@@ -79,7 +81,7 @@ export function setupPageTranslationHandlers(): void {
 
   onMessage("enqueueTranslateRequest", async (message) => {
     const routing = getQueuedTranslationRouting(message.data)
-    const { requestQueue, batchQueue } = await queuesPromise
+    const { requestQueue, batchQueue, mtRequestQueue, mtBatchQueue } = await queuesPromise
     const {
       data: {
         text,
@@ -140,7 +142,31 @@ export function setupPageTranslationHandlers(): void {
       webSummary: normalizePromptContextValue(webSummary),
     }
 
-    if (shouldUseBatchQueue(providerRef)) {
+    if (isNonAPIMachineProvider(providerRef)) {
+      const localProvider = getLocalProviderConfig(providerRef)
+      if (!localProvider) {
+        throw new Error("Invalid local machine translation provider")
+      }
+      if (localProvider.provider === "microsoft-translate" && textFormat !== "html") {
+        const data = {
+          text,
+          langConfig,
+          ...routing,
+          hash,
+          scheduleAt,
+          scope,
+        }
+        result = await mtBatchQueue.enqueue(data)
+      } else {
+        const thunk = (signal?: AbortSignal) =>
+          executeMachineTranslationWithFallback(text, langConfig, localProvider, {
+            textFormat,
+            preserveLineBreaks,
+            signal,
+          })
+        result = await mtRequestQueue.enqueue(thunk, scheduleAt, hash, scope ? [scope] : undefined)
+      }
+    } else if (shouldUseBatchQueue(providerRef)) {
       const data = {
         text,
         langConfig,
@@ -239,14 +265,18 @@ export function setupPageTranslationHandlers(): void {
     // Remember the scope BEFORE any await so enqueue handlers suspended on
     // the cache lookup refuse to enqueue after this drain.
     cancelledScopes.markScope(scope)
-    const { requestQueue, batchQueue } = await queuesPromise
+    const { requestQueue, batchQueue, mtRequestQueue, mtBatchQueue } = await queuesPromise
     // Batch queue first so pending batches cannot flush new request-queue
     // tasks between the two drains.
+    const cancelledMtBatch = mtBatchQueue?.cancelByScope(scope) ?? 0
+    const cancelledMtRequests = mtRequestQueue?.cancelByScope(scope) ?? 0
     const cancelledBatch = batchQueue.cancelByScope(scope)
     const cancelledRequests = requestQueue.cancelByScope(scope)
-    if (cancelledBatch + cancelledRequests > 0) {
+    const totalCancelled =
+      cancelledMtBatch + cancelledMtRequests + cancelledBatch + cancelledRequests
+    if (totalCancelled > 0) {
       log.info("Cancelled page-translation requests", {
-        count: cancelledBatch + cancelledRequests,
+        count: totalCancelled,
         scope,
       })
     }
@@ -257,7 +287,9 @@ export function setupPageTranslationHandlers(): void {
   browser.tabs.onRemoved.addListener((tabId) => {
     const prefix = `${tabId}:`
     cancelledScopes.markPrefix(prefix)
-    void queuesPromise.then(({ requestQueue, batchQueue }) => {
+    void queuesPromise.then(({ requestQueue, batchQueue, mtRequestQueue, mtBatchQueue }) => {
+      mtBatchQueue?.cancelWhere((scope) => scope.startsWith(prefix))
+      mtRequestQueue?.cancelWhere((scope) => scope.startsWith(prefix))
       batchQueue.cancelWhere((scope) => scope.startsWith(prefix))
       requestQueue.cancelWhere((scope) => scope.startsWith(prefix))
     })

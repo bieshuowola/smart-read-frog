@@ -90,3 +90,48 @@ export async function executeTranslate<TContext>(
 
   return normalizeTranslationOutput(providerConfig, translatedText).trim()
 }
+
+/**
+ * Native batch execution for Microsoft Translate's bare JSON string array API.
+ * Translates up to 20 paragraphs in a single HTTP round trip without artificial delimiters.
+ */
+export async function executeMicrosoftBatchTranslate(
+  texts: readonly string[],
+  langConfig: Config["language"],
+  providerConfig: ProviderConfig,
+  options?: {
+    signal?: AbortSignal
+  },
+): Promise<string[]> {
+  if (texts.length === 0) return []
+  if (providerConfig.provider !== "microsoft-translate") {
+    throw new Error(`executeMicrosoftBatchTranslate called with unsupported provider: ${providerConfig.provider}`)
+  }
+
+  const prepared = texts.map((text) => prepareTranslationText(text))
+  const nonEmptyIndices: number[] = []
+  const nonEmptyTexts: string[] = []
+  for (let i = 0; i < prepared.length; i++) {
+    if (prepared[i] !== "") {
+      nonEmptyIndices.push(i)
+      nonEmptyTexts.push(prepared[i]!)
+    }
+  }
+
+  const results = new Array<string>(texts.length).fill("")
+  if (nonEmptyTexts.length === 0) return results
+
+  const sourceLang = toMicrosoftSourceCode(langConfig.sourceCode)
+  const targetLang = toMicrosoftLanguageCode(langConfig.targetCode)
+  const translated = await microsoftTranslate(nonEmptyTexts, sourceLang, targetLang, {
+    textFormat: "plain",
+    signal: options?.signal,
+  })
+
+  for (let idx = 0; idx < nonEmptyIndices.length; idx++) {
+    const targetIndex = nonEmptyIndices[idx]!
+    const raw = translated[idx] ?? ""
+    results[targetIndex] = normalizeTranslationOutput(providerConfig, raw).trim()
+  }
+  return results
+}
