@@ -21,6 +21,93 @@ const SNAKE_CASE_RE = /\b[a-zA-Z][a-zA-Z0-9]*_[a-zA-Z0-9_]+\b/g
 const CAMEL_OR_INTERNAL_CAPS_RE = /\b[a-z]+[A-Z][a-zA-Z0-9]*\b|\b[A-Z][a-z]+[A-Z][a-zA-Z0-9]*\b/g
 const KEBAB_IDENTIFIER_RE = /\b[a-z0-9]+-[a-z0-9]+(?:-[a-z0-9]+)*\b/g
 const ALL_CAPS_ACRONYM_RE = /\b[A-Z]{2,}(?:_[A-Z0-9]+)*\b/g
+const LATIN_UPPER_VOWEL_RE = /[AEIOUY]/
+const TECHNICAL_ALL_CAPS_WITH_VOWELS = new Set([
+  "API",
+  "AI",
+  "UI",
+  "UX",
+  "IO",
+  "OS",
+  "ID",
+  "IP",
+  "URI",
+  "GUID",
+  "UUID",
+  "CUDA",
+  "WASM",
+  "CORS",
+  "CSRF",
+  "REST",
+  "SOAP",
+  "YAML",
+  "TOML",
+  "ASCII",
+  "UTF",
+  "BIOS",
+  "UEFI",
+  "RAID",
+  "SATA",
+  "NVME",
+  "OLED",
+  "HDMI",
+  "WIFI",
+  "SIM",
+  "RAM",
+  "ROM",
+  "SSD",
+  "HDD",
+  "USB",
+  "LAN",
+  "WAN",
+  "MAC",
+  "NPU",
+  "TPU",
+  "RAG",
+  "LLM",
+  "MCP",
+  "IDE",
+  "GUI",
+  "EOF",
+  "NAN",
+  "NULL",
+  "TRUE",
+  "FALSE",
+  "ETA",
+  "CPU",
+  "GPU",
+  "NPU",
+  "HUD",
+  "FOV",
+  "LOD",
+  "LUA",
+  "VFX",
+  "SFX",
+  "RTX",
+  "AMD",
+  "FAQ",
+  "VIP",
+  "URL",
+  "OCR",
+  "SSO",
+  "IAM",
+  "AES",
+  "RSA",
+  "SHA",
+  "EXE",
+  "MSI",
+  "APK",
+  "ISO",
+  "CI",
+  "CD",
+  "QA",
+])
+
+function isTechnicalAcronym(token: string): boolean {
+  if (/[_\d]/.test(token)) return true
+  if (!LATIN_UPPER_VOWEL_RE.test(token)) return true
+  return TECHNICAL_ALL_CAPS_WITH_VOWELS.has(token)
+}
 
 const CLI_PREFIX_RE =
   /^\s*(?:\$|>\s|#\s)?(?:npm|pnpm|yarn|bun|npx|pnpx|node|tsx|python|python3|pip|pip3|git|gh|curl|wget|docker|kubectl|helm|cargo|rustc|go|dotnet|wxt|vitest|eslint|oxlint|chmod|chown|mkdir|rm|cp|mv|ls|cd|cat|echo|export|set|schtasks|powershell|pwsh|sudo|apt|brew)\b/i
@@ -53,7 +140,7 @@ export function stripTechnicalTokens(text: string): string {
     .replace(SNAKE_CASE_RE, " ")
     .replace(CAMEL_OR_INTERNAL_CAPS_RE, " ")
     .replace(KEBAB_IDENTIFIER_RE, " ")
-    .replace(ALL_CAPS_ACRONYM_RE, " ")
+    .replace(ALL_CAPS_ACRONYM_RE, (token) => (isTechnicalAcronym(token) ? " " : token))
     .replace(/\s+/g, " ")
     .trim()
 }

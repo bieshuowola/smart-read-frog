@@ -36,6 +36,11 @@
   display: block !important;
 }
 
+[data-read-frog-bilingual-wrap="true"] {
+  white-space: normal !important;
+  text-overflow: clip !important;
+}
+
 .read-frog-translated-inline-content {
   display: inline;
   color: var(--rf-web-color, inherit);

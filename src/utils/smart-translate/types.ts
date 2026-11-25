@@ -29,6 +29,7 @@ export type BlockClassificationReason =
   | "mixed_with_foreign_clause"
   | "already_target_language"
   | "ambiguous_conservative_skip"
+  | "author_or_username_protected"
 
 export interface BlockClassificationResult {
   shouldTranslate: boolean

@@ -13,7 +13,6 @@ import {
   isHTMLElement,
   isNaturalBlockTransNode,
   isSiteRuleForceBlockStyleElement,
-  isTextNode,
   isTransNode,
 } from "../../dom/filter"
 import { translateNodes } from "./translation-modes"
@@ -100,7 +99,12 @@ export async function translateWalkedElement(
       const children = [...element.childNodes]
       let consecutiveInlineNodes: ChildNode[] = []
       for (const child of children) {
-        if (isTransNode(child) && isBlockTransNode(child) && !isTextNode(child)) {
+        if (
+          isHTMLElement(child) &&
+          ((isTransNode(child) && isBlockTransNode(child)) ||
+            (!child.hasAttribute(PARAGRAPH_ATTRIBUTE) &&
+              Boolean(child.querySelector(`[${PARAGRAPH_ATTRIBUTE}]`))))
+        ) {
           // A Node-only forced block may split the translation run without
           // changing wrapper layout. Natural block children and the combined
           // Node+Style shape produced by legacy force-block migration retain

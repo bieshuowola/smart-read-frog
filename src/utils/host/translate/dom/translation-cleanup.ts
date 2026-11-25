@@ -5,6 +5,7 @@ import type {
   VirtualParagraphGroup,
 } from "../core/translation-state"
 import {
+  BILINGUAL_WRAP_ATTRIBUTE,
   CONTENT_WRAPPER_CLASS,
   REACT_SHADOW_HOST_CLASS,
   SPINNER_CLASS,
@@ -107,6 +108,17 @@ function restoreTextSplit(record: TextSplitRecord): boolean {
   return false
 }
 
+function clearBilingualWrapIfUnused(host: Node | null): void {
+  if (
+    host &&
+    isHTMLElement(host) &&
+    host.hasAttribute(BILINGUAL_WRAP_ATTRIBUTE) &&
+    !host.querySelector(`.${CONTENT_WRAPPER_CLASS}`)
+  ) {
+    host.removeAttribute(BILINGUAL_WRAP_ATTRIBUTE)
+  }
+}
+
 export function disposeVirtualParagraphGroup(group: VirtualParagraphGroup): {
   restored: number
   skipped: number
@@ -116,11 +128,14 @@ export function disposeVirtualParagraphGroup(group: VirtualParagraphGroup): {
   group.status = "disposing"
   unregisterVirtualParagraphGroup(group)
 
+  const wrapperHosts = new Set<Node>()
   for (const wrapper of group.wrappers) {
+    if (wrapper.parentElement) wrapperHosts.add(wrapper.parentElement)
     removeShadowHostInTranslatedWrapper(wrapper)
     markExtensionDrivenNodeRemoval(wrapper)
     wrapper.remove()
   }
+  wrapperHosts.forEach((host) => clearBilingualWrapIfUnused(host))
   group.wrappers.clear()
   group.wrapperPlacements.clear()
 
@@ -146,9 +161,11 @@ export function removeOrphanVirtualParagraphWrappers(source: HTMLElement): boole
   ].filter((wrapper) => !getVirtualParagraphGroupForWrapper(wrapper))
 
   orphanWrappers.forEach((wrapper) => {
+    const host = wrapper.parentElement
     removeShadowHostInTranslatedWrapper(wrapper)
     markExtensionDrivenNodeRemoval(wrapper)
     wrapper.remove()
+    clearBilingualWrapIfUnused(host)
   })
   return orphanWrappers.length > 0
 }
@@ -158,10 +175,12 @@ export function dropVirtualParagraphWrapper(
   wrapper: HTMLElement,
 ): void {
   if (group.status !== "active" || !group.wrappers.has(wrapper)) return
+  const host = wrapper.parentElement
   removeShadowHostInTranslatedWrapper(wrapper)
   unregisterVirtualParagraphWrapper(group, wrapper)
   markExtensionDrivenNodeRemoval(wrapper)
   wrapper.remove()
+  clearBilingualWrapIfUnused(host)
   if (group.wrappers.size === 0) disposeVirtualParagraphGroup(group)
 }
 
@@ -382,11 +401,13 @@ export function teardownVirtualTranslationOnlyGeneration(layoutSource: HTMLEleme
  * @returns for translationOnly wrappers, the original nodes re-inserted by the restore
  */
 export function removeTranslatedWrapperWithRestore(wrapper: HTMLElement): ChildNode[] {
+  const host = wrapper.parentElement
   // Every path below removes the wrapper (directly or via restore).
   markExtensionDrivenNodeRemoval(wrapper)
   const virtualParagraphGroup = getVirtualParagraphGroupForWrapper(wrapper)
   if (virtualParagraphGroup) {
     disposeVirtualParagraphGroup(virtualParagraphGroup)
+    clearBilingualWrapIfUnused(host)
     return []
   }
 
@@ -398,10 +419,13 @@ export function removeTranslatedWrapperWithRestore(wrapper: HTMLElement): ChildN
   const translationMode = wrapper.getAttribute(TRANSLATION_MODE_ATTRIBUTE)
 
   if (translationMode === "translationOnly") {
-    return restoreTranslationOnlyWrapper(wrapper)
+    const restored = restoreTranslationOnlyWrapper(wrapper)
+    clearBilingualWrapIfUnused(host)
+    return restored
   }
 
   wrapper.remove()
+  clearBilingualWrapIfUnused(host)
   return []
 }
 

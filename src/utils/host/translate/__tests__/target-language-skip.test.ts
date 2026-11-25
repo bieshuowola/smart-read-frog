@@ -3,6 +3,10 @@ import type { Config } from "@/types/config/config"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { DEFAULT_CONFIG } from "@/utils/constants/config"
 import { flushBatchedOperations } from "@/utils/host/dom/batch-dom"
+import {
+  clearCurrentPageSmartDecision,
+  setCurrentPageSmartDecision,
+} from "@/utils/smart-translate/page-mode-context"
 import { translateNodes } from "../core/translation-modes"
 import { shouldSkipAsTargetLanguage } from "../target-language-skip"
 
@@ -102,6 +106,60 @@ describe("shouldSkipAsTargetLanguage", () => {
     await expect(
       shouldSkipAsTargetLanguage("こんにちは、新しいドキュメントをご覧ください。", smartCfg),
     ).resolves.toBe(false)
+  })
+
+  it("honors DOM elementRole in partial-auto and preserves approval across the immediately following backstop check", async () => {
+    const smartCfg = createConfig({ smartAutoTranslate: true })
+    setCurrentPageSmartDecision(window.location.href, {
+      mode: "partial-auto",
+      shouldAutoTranslate: true,
+      detectedLanguage: "zh-Hans",
+      reason: "chinese_with_foreign_blocks",
+      totalBlocks: 10,
+      foreignBlocks: 2,
+      chineseBlocks: 8,
+      technicalBlocks: 0,
+      foreignLanguages: ["en"],
+    })
+
+    try {
+      const heading = document.createElement("div")
+      heading.className = "workshopItemTitle"
+      heading.textContent = "Vanilla Expanded Framework"
+
+      const comment = document.createElement("div")
+      comment.className = "commentthread_comment_text"
+      comment.textContent = "Nice"
+
+      const category = document.createElement("label")
+      category.textContent = "Models"
+
+      const author = document.createElement("a")
+      author.href = "https://example.com/id/Kasodus"
+      author.className = "commentthread_author_link"
+      author.textContent = "Kasodus"
+
+      document.body.append(heading, comment, category, author)
+
+      // 1. Author handle is skipped
+      await expect(shouldSkipAsTargetLanguage("Kasodus", smartCfg, [author])).resolves.toBe(true)
+
+      // 2. Title, short comment, and category approved with nodes stay approved on immediate node-less backstop
+      await expect(
+        shouldSkipAsTargetLanguage("Vanilla Expanded Framework", smartCfg, [heading]),
+      ).resolves.toBe(false)
+      await expect(shouldSkipAsTargetLanguage("Vanilla Expanded Framework", smartCfg)).resolves.toBe(
+        false,
+      )
+
+      await expect(shouldSkipAsTargetLanguage("Nice", smartCfg, [comment])).resolves.toBe(false)
+      await expect(shouldSkipAsTargetLanguage("Nice", smartCfg)).resolves.toBe(false)
+
+      await expect(shouldSkipAsTargetLanguage("Models", smartCfg, [category])).resolves.toBe(false)
+      await expect(shouldSkipAsTargetLanguage("Models", smartCfg)).resolves.toBe(false)
+    } finally {
+      clearCurrentPageSmartDecision()
+    }
   })
 })
 

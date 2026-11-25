@@ -26,6 +26,7 @@ import { setupUrlChangeListener, URL_CHANGE_EVENT_NAME } from "./listen"
 import { closePageDiagnosisPanel, togglePageDiagnosisPanel } from "./page-diagnosis"
 import { bindTranslationModeShortcutKey } from "./translation-control/bind-translation-mode-shortcut"
 import { bindTranslationShortcutKey } from "./translation-control/bind-translation-shortcut"
+import { handleTranslationModeChange } from "./translation-control/handle-config-change"
 import { registerNodeTranslationTriggers } from "./translation-control/node-translation"
 import { PageTranslationManager } from "./translation-control/page-translation"
 
@@ -58,19 +59,28 @@ export async function bootstrapHostContent(
 
   const cleanupPageTranslationTriggers = manager.registerPageTranslationTriggers()
 
-  // The tab-title switch applies to an already-translated page at once. Only
-  // the top frame owns the title, so iframes skip parsing every config write.
-  const cleanupTitleTranslationWatch =
-    window === window.top
-      ? storage.watch<Config>(`local:${CONFIG_STORAGE_KEY}`, (config) => {
-          const parsedConfig = configSchema.safeParse(config)
-          if (parsedConfig.success) {
-            manager.setTitleTranslationEnabled(
-              parsedConfig.data.pageTranslation.page.translateTitle,
-            )
-          }
-        })
-      : () => {}
+  // Apply tab-title switches (top frame only) and bilingual <-> translationOnly mode switches
+  // to active sessions as soon as persisted config changes.
+  const cleanupTitleTranslationWatch = storage.watch<Config>(
+    `local:${CONFIG_STORAGE_KEY}`,
+    (newConfig, oldConfig) => {
+      const parsedNew = configSchema.safeParse(newConfig)
+      if (!parsedNew.success) return
+
+      if (window === window.top) {
+        manager.setTitleTranslationEnabled(
+          parsedNew.data.pageTranslation.page.translateTitle,
+        )
+      }
+
+      const parsedOld = configSchema.safeParse(oldConfig)
+      handleTranslationModeChange(
+        parsedNew.data,
+        parsedOld.success ? parsedOld.data : null,
+        manager,
+      )
+    },
+  )
 
   const cleanupTranslationShortcut = await bindTranslationShortcutKey(manager)
 

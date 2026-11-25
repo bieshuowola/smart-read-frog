@@ -308,4 +308,36 @@ describe("bootstrapHostContent URL changes", () => {
     act(() => toastManager.close())
     invalidate()
   })
+
+  it("re-translates active pages when translation mode changes in config and skips inactive sessions", async () => {
+    const unwatch = vi.fn<() => void>()
+    const watch = vi.spyOn(storage, "watch").mockReturnValue(unwatch)
+    const { ctx, invalidate } = createContentScriptContext()
+    try {
+      await bootstrapHostContent(ctx, null)
+      const manager = managerInstances[0]!
+      const onConfigChange = watch.mock.calls.find(
+        ([key]) => key === `local:${CONFIG_STORAGE_KEY}`,
+      )?.[1]
+      expect(onConfigChange).toBeDefined()
+
+      const translationOnlyConfig = structuredClone(DEFAULT_CONFIG)
+      translationOnlyConfig.pageTranslation.mode = "translationOnly"
+
+      manager.isActive = true
+      onConfigChange!(translationOnlyConfig, DEFAULT_CONFIG)
+      expect(manager.stop).toHaveBeenCalledOnce()
+      expect(manager.start).toHaveBeenCalledOnce()
+
+      manager.isActive = false
+      onConfigChange!(DEFAULT_CONFIG, translationOnlyConfig)
+      expect(manager.stop).toHaveBeenCalledOnce()
+      expect(manager.start).toHaveBeenCalledOnce()
+
+      invalidate()
+      expect(unwatch).toHaveBeenCalledOnce()
+    } finally {
+      watch.mockRestore()
+    }
+  })
 })

@@ -11,8 +11,10 @@ import { classifyResolvedProvider } from "@/utils/analytics-provider"
 import { getLocalConfig } from "@/utils/config/storage"
 import {
   CONTENT_WRAPPER_CLASS,
+  PARAGRAPH_ATTRIBUTE,
   REACT_SHADOW_HOST_CLASS,
   SPINNER_CLASS,
+  WALKED_ATTRIBUTE,
 } from "@/utils/constants/dom-labels"
 import { MICROSOFT_TRANSLATE_PROVIDER_ID } from "@/utils/constants/providers"
 import {
@@ -334,6 +336,7 @@ export class PageTranslationManager implements IPageTranslationManager {
   private intersectionOptions: IntersectionObserverInit
   private walkBlockedElementsCache = new WeakSet<HTMLElement>()
   private ancestorsWithWalkBlockedElements = new WeakSet<HTMLElement>()
+  private attributeRevealedTextFingerprints = new WeakMap<HTMLElement, string>()
   private refreshingTranslatedSources = new WeakSet<HTMLElement>()
   private translatedSourceMutationVersions = new WeakMap<HTMLElement, number>()
   // Enumerable so an external CSS reveal can retry them; pruned by isConnected
@@ -782,6 +785,7 @@ export class PageTranslationManager implements IPageTranslationManager {
     this.walkId = null
     this.walkBlockedElementsCache = new WeakSet()
     this.ancestorsWithWalkBlockedElements = new WeakSet()
+    this.attributeRevealedTextFingerprints = new WeakMap()
     this.refreshingTranslatedSources = new WeakSet()
     this.translatedSourceMutationVersions = new WeakMap()
     this.blockedStaleSources.clear()
@@ -1632,12 +1636,30 @@ export class PageTranslationManager implements IPageTranslationManager {
     }
 
     const staleTranslatedSources = new Set<HTMLElement>()
+    const untranslatedCharacterDataParents = new Set<HTMLElement>()
     for (const record of hostRecords) {
       const staleSource = findStaleBilingualLayoutSource(record.target)
       if (staleSource) staleTranslatedSources.add(staleSource)
       // In-place-swapped anchors must also recover after host edits.
       const staleAnchor = findStaleTranslationOnlyAnchor(record.target)
       if (staleAnchor) staleTranslatedSources.add(staleAnchor)
+
+      if (
+        record.type === "characterData" &&
+        !staleSource &&
+        !staleAnchor &&
+        !findEnclosingBilingualLayoutSource(record.target)
+      ) {
+        const parentEl = record.target.parentElement
+        if (
+          parentEl &&
+          parentEl.isConnected &&
+          !parentEl.closest(`.${CONTENT_WRAPPER_CLASS}, .${REACT_SHADOW_HOST_CLASS}`) &&
+          (record.target.textContent ?? "").trim().length > 0
+        ) {
+          untranslatedCharacterDataParents.add(parentEl)
+        }
+      }
     }
     staleTranslatedSources.forEach((source) => {
       const nextVersion = (this.translatedSourceMutationVersions.get(source) ?? 0) + 1
@@ -1653,7 +1675,9 @@ export class PageTranslationManager implements IPageTranslationManager {
     if (!gate) return
     const { config: mutationConfig, revealedRoot } = gate
 
-    const needsTraversalHandling = hostRecords.some((record) => record.type !== "characterData")
+    const needsTraversalHandling =
+      hostRecords.some((record) => record.type !== "characterData") ||
+      (!revealedRoot && untranslatedCharacterDataParents.size > 0)
     if (
       staleTranslatedSources.size === 0 &&
       this.blockedStaleSources.size === 0 &&
@@ -1674,6 +1698,15 @@ export class PageTranslationManager implements IPageTranslationManager {
       if (source.isConnected && this.isSourceWalkBlocked(source, config)) continue
       this.blockedStaleSources.delete(source)
       if (source.isConnected) staleTranslatedSources.add(source)
+    }
+
+    const dynamicNodesToObserve = new Set<HTMLElement>()
+    if (!revealedRoot) {
+      for (const parentEl of untranslatedCharacterDataParents) {
+        if (parentEl.isConnected && !this.isSourceWalkBlocked(parentEl, config)) {
+          dynamicNodesToObserve.add(parentEl)
+        }
+      }
     }
 
     // Recovery already walked and registered the whole enclosing tree. Still
@@ -1702,25 +1735,78 @@ export class PageTranslationManager implements IPageTranslationManager {
           })
           continue
         }
+        let addedDirectProseText = false
         rec.addedNodes.forEach((node) => {
           if (isHTMLElement(node)) {
             this.addWalkBlockedElements(node, config)
             void this.observeTopLevelParagraphs(node, config)
             this.observeIsolatedDescendantsMutations(node, config)
+          } else if (node.nodeType === Node.TEXT_NODE && Boolean(node.textContent?.trim())) {
+            addedDirectProseText = true
           }
         })
+        if (
+          addedDirectProseText &&
+          isHTMLElement(rec.target) &&
+          rec.target.isConnected &&
+          !rec.target.closest(`.${CONTENT_WRAPPER_CLASS}, .${REACT_SHADOW_HOST_CLASS}`) &&
+          !this.isSourceWalkBlocked(rec.target, config)
+        ) {
+          dynamicNodesToObserve.add(rec.target)
+        }
       } else if (this.isWalkabilityAttributeMutation(rec)) {
         const el = rec.target
         if (!isHTMLElement(el)) continue
-        for (const unblocked of this.collectNewlyWalkableSubtrees(el, config)) {
-          void this.observeTopLevelParagraphs(unblocked, config)
-          // A blocked addition under a current source can skip isolated-tree
-          // registration. Observe future shadow mutations when it unblocks.
-          // Descendant hosts may still be blocked after this ancestor opens.
-          this.observeIsolatedDescendantsMutations(unblocked, config)
+        const unblockedSubtrees = this.collectNewlyWalkableSubtrees(el, config)
+        if (unblockedSubtrees.length > 0) {
+          for (const unblocked of unblockedSubtrees) {
+            void this.observeTopLevelParagraphs(unblocked, config)
+            // A blocked addition under a current source can skip isolated-tree
+            // registration. Observe future shadow mutations when it unblocks.
+            // Descendant hosts may still be blocked after this ancestor opens.
+            this.observeIsolatedDescendantsMutations(unblocked, config)
+          }
+        } else if (
+          !this.walkBlockedElementsCache.has(el) &&
+          !this.ancestorsWithWalkBlockedElements.has(el) &&
+          !(
+            this.walkId &&
+            el.getAttribute(WALKED_ATTRIBUTE) === this.walkId &&
+            (el.hasAttribute(PARAGRAPH_ATTRIBUTE) ||
+              Boolean(
+                el.querySelector(
+                  `[${PARAGRAPH_ATTRIBUTE}][${WALKED_ATTRIBUTE}="${CSS.escape(this.walkId)}"]`,
+                ),
+              ))
+          ) &&
+          el.isConnected &&
+          !el.closest(`.${CONTENT_WRAPPER_CLASS}, .${REACT_SHADOW_HOST_CLASS}`) &&
+          !findEnclosingBilingualLayoutSource(el) &&
+          !this.isSourceWalkBlocked(el, config)
+        ) {
+          const textFingerprint = (el.textContent ?? "").trim()
+          if (
+            textFingerprint.length >= 2 &&
+            this.attributeRevealedTextFingerprints.get(el) !== textFingerprint
+          ) {
+            this.attributeRevealedTextFingerprints.set(el, textFingerprint)
+            dynamicNodesToObserve.add(el)
+            this.observeIsolatedDescendantsMutations(el, config)
+          }
         }
       }
     }
+
+    // Observe newly updated/revealed targets (deduplicating nested descendants).
+    const dynamicTargets = [...dynamicNodesToObserve].filter(
+      (candidate) =>
+        ![...dynamicNodesToObserve].some(
+          (other) => other !== candidate && other.contains(candidate),
+        ),
+    )
+    dynamicTargets.forEach((node) => {
+      void this.observeTopLevelParagraphs(node, config)
+    })
 
     await Promise.all(
       [...staleTranslatedSources].map((source) =>

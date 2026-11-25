@@ -5,6 +5,7 @@ import type { Config, InputTranslationLang } from "@/types/config/config"
 import type { TranslateProviderConfig } from "@/types/config/provider"
 import type { TranslationTextFormat } from "@/types/config/translate"
 import type { ResolvedProviderRef } from "@/utils/providers/provider-registry"
+import type { BlockElementRole } from "@/utils/smart-translate/element-context"
 import { getDetectedCodeFromStorage, getFinalSourceCode } from "@/utils/config/languages"
 import { createLogger } from "@/utils/logging/logger"
 import {
@@ -107,6 +108,7 @@ async function translateTextUsingPageConfig(
     forceRetranslation?: boolean
     diagnosis?: ParagraphDiagnosis
     scheduleAt?: number
+    elementRole?: BlockElementRole
   } = {},
 ): Promise<string> {
   const { diagnosis } = options
@@ -120,7 +122,14 @@ async function translateTextUsingPageConfig(
 
   // Backstop only: the page modes hoist this check before DOM insertion, but
   // other callers (e.g. the page title) still rely on it here.
-  if (await shouldSkipAsTargetLanguage(preparedText, config)) {
+  if (
+    await shouldSkipAsTargetLanguage(
+      preparedText,
+      config,
+      undefined,
+      options.elementRole ? { elementRole: options.elementRole } : undefined,
+    )
+  ) {
     log.debug("Skipped: already in the target language", { text: preparedText })
     diagnosis?.untranslated("targetLanguage")
     return ""
@@ -218,6 +227,7 @@ export async function translateTextForPageTitle(text: string): Promise<string> {
       webSummary: webPageContext?.webSummary,
     },
     sessionId,
+    elementRole: "heading",
   })
 }
 

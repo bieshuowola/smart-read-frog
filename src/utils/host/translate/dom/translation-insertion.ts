@@ -3,6 +3,7 @@ import type { TranslationNodeStyleConfig } from "@/types/config/translate"
 import type { TransNode } from "@/types/dom"
 import { getDocumentSiteRule } from "@/utils/site-rules/effective"
 import {
+  BILINGUAL_WRAP_ATTRIBUTE,
   BLOCK_CONTENT_CLASS,
   FLOAT_WRAP_ATTRIBUTE,
   INLINE_CONTENT_CLASS,
@@ -205,6 +206,15 @@ export async function insertTranslatedNodeIntoWrapper(
   await decorateTranslationNode(translatedNode, translationNodeStyle)
 
   if (isCurrent && !isCurrent()) return
+
+  const wrapperHost = translatedWrapperNode.parentElement
+  if (
+    wrapperHost &&
+    isHTMLElement(wrapperHost) &&
+    window.getComputedStyle(wrapperHost).whiteSpace === "nowrap"
+  ) {
+    wrapperHost.setAttribute(BILINGUAL_WRAP_ATTRIBUTE, "true")
+  }
 
   // GitHub renders footnotes inside <sub> with line-height: 0. The original
   // text wraps in the outer paragraph's line boxes, but our block translation

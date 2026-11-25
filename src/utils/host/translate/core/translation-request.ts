@@ -50,10 +50,11 @@ export function preparePageTranslationSource(
 export async function getPageTranslationSkipReason(
   text: string,
   config: Config,
+  nodes?: readonly TransNode[],
 ): Promise<UntranslatedReason | null> {
   if (!text.trim() || isNumericContent(text)) return "noProse"
   if (await shouldFilterSmallParagraph(text, config)) return "tooShort"
-  if (await shouldSkipAsTargetLanguage(text, config)) return "targetLanguage"
+  if (await shouldSkipAsTargetLanguage(text, config, nodes)) return "targetLanguage"
   return null
 }
 

@@ -371,7 +371,7 @@ async function filterVirtualParagraphUnits(
   config: Config,
 ): Promise<VirtualParagraphUnit[]> {
   const skipReasons = await Promise.all(
-    units.map((unit) => getPageTranslationSkipReason(unit.text, config)),
+    units.map((unit) => getPageTranslationSkipReason(unit.text, config, [layoutSource])),
   )
   const included: VirtualParagraphUnit[] = []
   units.forEach((unit, index) => {
@@ -723,7 +723,7 @@ export async function translateNodesBilingualMode(
     try {
       // Target-language skip runs here, BEFORE the wrapper/spinner is inserted,
       // so same-language paragraphs never touch the DOM.
-      skipReason = await getPageTranslationSkipReason(atomExtraction.filterText, config)
+      skipReason = await getPageTranslationSkipReason(atomExtraction.filterText, config, transNodes)
     } catch (error) {
       if (bilingualState) unregisterBilingualTranslationState(bilingualState)
       throw error
@@ -1284,7 +1284,7 @@ async function translateTranslationOnlyRun(
       return
     }
     const diagnosis = diagnoseParagraph(paragraphNodes, source.filterText)
-    const skipReason = await getPageTranslationSkipReason(source.filterText, config)
+    const skipReason = await getPageTranslationSkipReason(source.filterText, config, paragraphNodes)
     if (skipReason) {
       diagnosis.untranslated(skipReason)
       return

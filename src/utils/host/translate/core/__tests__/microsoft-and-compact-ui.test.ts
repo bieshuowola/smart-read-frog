@@ -2,8 +2,9 @@
 import type { Config } from "@/types/config/config"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { DEFAULT_CONFIG } from "@/utils/constants/config"
-import { CONTENT_WRAPPER_CLASS, TRANSLATION_ONLY_ATTRIBUTE } from "@/utils/constants/dom-labels"
+import { BILINGUAL_WRAP_ATTRIBUTE, CONTENT_WRAPPER_CLASS, TRANSLATION_ONLY_ATTRIBUTE } from "@/utils/constants/dom-labels"
 import { flushBatchedOperations } from "@/utils/host/dom/batch-dom"
+import { walkAndLabelElement } from "@/utils/host/dom/traversal"
 import { removeAllTranslatedWrapperNodes } from "@/utils/host/translate/dom/translation-cleanup"
 import { decorateTranslationNode } from "@/utils/host/translate/ui/decorate-translation"
 import {
@@ -11,6 +12,7 @@ import {
   setCurrentPageSmartDecision,
 } from "@/utils/smart-translate/page-mode-context"
 import { translateNodesBilingualMode, translateNodeTranslationOnlyMode } from "../translation-modes"
+import { translateWalkedElement } from "../translation-walker"
 import {
   beginPageTranslationSession,
   getPageTranslationFailureSummary,
@@ -225,5 +227,75 @@ describe("Microsoft translationOnly & compact interactive UI adaptation", () => 
     expect(failedPara.textContent).toBe("This paragraph fails initially")
     expect(strong.textContent).toBe("API Reference")
     expect(link.getAttribute("title")).toBe("Read Docs")
+  })
+
+  it("keeps short and long card/list/sidebar titles consistently bilingual and unwraps nowrap ellipsis hosts", async () => {
+    const shortTitle = document.createElement("div")
+    shortTitle.className = "workshopItemTitle ellipsis"
+    shortTitle.style.whiteSpace = "nowrap"
+    shortTitle.textContent = "Clean UI"
+
+    const longTitle = document.createElement("div")
+    longTitle.className = "workshopItemTitle ellipsis"
+    longTitle.style.whiteSpace = "nowrap"
+    longTitle.textContent = "Expanded Framework For Large Modpacks and Overhauls"
+
+    const sidebarTreeCategory = document.createElement("div")
+    sidebarTreeCategory.setAttribute("role", "treeitem")
+    sidebarTreeCategory.style.whiteSpace = "nowrap"
+    sidebarTreeCategory.textContent = "Models"
+
+    document.body.append(shortTitle, longTitle, sidebarTreeCategory)
+    walkAndLabelElement(document.body, "walk-bilingual-1", BILINGUAL_MICROSOFT_CONFIG)
+
+    await translateNodesBilingualMode([shortTitle], "walk-bilingual-1", BILINGUAL_MICROSOFT_CONFIG)
+    await translateNodesBilingualMode([longTitle], "walk-bilingual-1", BILINGUAL_MICROSOFT_CONFIG)
+    await translateNodesBilingualMode(
+      [sidebarTreeCategory],
+      "walk-bilingual-1",
+      BILINGUAL_MICROSOFT_CONFIG,
+    )
+    flushBatchedOperations()
+
+    // None of them may be swapped in-place in bilingual mode
+    expect(document.querySelectorAll(`[${TRANSLATION_ONLY_ATTRIBUTE}]`)).toHaveLength(0)
+    expect(shortTitle.querySelector(`.${CONTENT_WRAPPER_CLASS}`)).not.toBeNull()
+    expect(longTitle.querySelector(`.${CONTENT_WRAPPER_CLASS}`)).not.toBeNull()
+    expect(sidebarTreeCategory.querySelector(`.${CONTENT_WRAPPER_CLASS}`)).not.toBeNull()
+
+    // Nowrap ellipsis hosts receive the unwrap marker so both lines remain visible
+    expect(shortTitle.getAttribute(BILINGUAL_WRAP_ATTRIBUTE)).toBe("true")
+    expect(longTitle.getAttribute(BILINGUAL_WRAP_ATTRIBUTE)).toBe("true")
+    expect(sidebarTreeCategory.getAttribute(BILINGUAL_WRAP_ATTRIBUTE)).toBe("true")
+
+    removeAllTranslatedWrapperNodes(document)
+    flushBatchedOperations()
+
+    expect(shortTitle.hasAttribute(BILINGUAL_WRAP_ATTRIBUTE)).toBe(false)
+    expect(longTitle.hasAttribute(BILINGUAL_WRAP_ATTRIBUTE)).toBe(false)
+    expect(sidebarTreeCategory.hasAttribute(BILINGUAL_WRAP_ATTRIBUTE)).toBe(false)
+    expect(shortTitle.textContent).toBe("Clean UI")
+  })
+
+  it("descends through inline anchors wrapping block titles without inserting outside title wrappers", async () => {
+    document.body.innerHTML = `
+      <div class="workshopItem">
+        <a id="card-link" href="#m1"><div id="card-title" class="workshopItemTitle">Clean UI</div></a>
+        <div class="workshopItemAuthorName">作者：<a href="/profiles/1">Sarg Bjornson</a></div>
+      </div>
+    `
+    const card = document.querySelector<HTMLElement>(".workshopItem")!
+    const link = document.getElementById("card-link")!
+    const title = document.getElementById("card-title")!
+
+    walkAndLabelElement(document.body, "walk-inline-block-1", BILINGUAL_MICROSOFT_CONFIG)
+    await translateWalkedElement(card, "walk-inline-block-1", BILINGUAL_MICROSOFT_CONFIG)
+    flushBatchedOperations()
+
+    expect(link.hasAttribute("data-read-frog-inline-node")).toBe(true)
+    expect(title.querySelector(`.${CONTENT_WRAPPER_CLASS}`)).not.toBeNull()
+    expect(
+      [...card.children].some((child) => child.classList.contains(CONTENT_WRAPPER_CLASS)),
+    ).toBe(false)
   })
 })

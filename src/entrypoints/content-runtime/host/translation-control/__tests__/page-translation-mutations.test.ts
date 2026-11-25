@@ -2605,4 +2605,53 @@ describe("pageTranslationManager mutation re-walk", () => {
     manager.stop()
     document.body.removeAttribute("data-read-frog-paragraph")
   })
+
+  it("re-walks containers when direct Text nodes, untranslated characterData, or attribute-revealed popover text updates", async () => {
+    const dynamicCard = document.createElement("div")
+    dynamicCard.id = "dynamic-card"
+    giveBox(dynamicCard)
+
+    const liveStatus = document.createElement("div")
+    liveStatus.id = "live-status"
+    const liveText = document.createTextNode("")
+    liveStatus.append(liveText)
+    giveBox(liveStatus)
+
+    const popover = document.createElement("div")
+    popover.id = "hover-popover"
+    giveBox(popover)
+
+    document.body.append(dynamicCard, liveStatus, popover)
+
+    const manager = new PageTranslationManager()
+    await manager.start()
+    await flushDomUpdates()
+
+    const initialObserveCalls = intersectionObservers[0]!.observe.mock.calls.length
+
+    // 1. Adding a direct Text node triggers walk & observation
+    dynamicCard.append(document.createTextNode("Dynamically inserted title"))
+    await flushDomUpdates()
+    expect(intersectionObservers[0]!.observe.mock.calls.length).toBeGreaterThan(initialObserveCalls)
+
+    // 2. Updating characterData on an initially empty/untranslated node triggers walk
+    const beforeCharDataCalls = intersectionObservers[0]!.observe.mock.calls.length
+    liveText.data = "Updated asynchronously"
+    await flushDomUpdates()
+    expect(intersectionObservers[0]!.observe.mock.calls.length).toBeGreaterThan(beforeCharDataCalls)
+
+    // 3. Attribute update accompanied by changed text re-walks; pure coordinate changes do not repeat
+    popover.textContent = "Hover description"
+    popover.setAttribute("style", "left: 120px; top: 80px")
+    await flushDomUpdates()
+    const afterPopoverRevealCalls = intersectionObservers[0]!.observe.mock.calls.length
+    expect(afterPopoverRevealCalls).toBeGreaterThan(beforeCharDataCalls)
+
+    const walkCallsBeforeMousemove = mockWalkAndLabelElement.mock.calls.length
+    popover.setAttribute("style", "left: 140px; top: 90px")
+    await flushDomUpdates()
+    expect(mockWalkAndLabelElement.mock.calls.length).toBe(walkCallsBeforeMousemove)
+
+    manager.stop()
+  })
 })

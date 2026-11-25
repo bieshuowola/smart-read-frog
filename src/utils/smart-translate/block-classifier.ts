@@ -1,4 +1,5 @@
 import type { LanguageTag } from "@read-frog/definitions"
+import type { BlockElementRole } from "./element-context"
 import type { BlockClassificationResult } from "./types"
 import { resolveLanguage } from "@read-frog/definitions"
 import { franc } from "franc"
@@ -16,6 +17,7 @@ export type BlockContextMode = "standalone" | "full-auto" | "partial-auto"
 export interface ClassifyBlockOptions {
   targetCode?: LanguageTag
   contextMode?: BlockContextMode
+  elementRole?: BlockElementRole
 }
 
 // Foreign grammatical function words / copulas / modals / pronouns / prepositions
@@ -311,18 +313,8 @@ const TECH_TERM_WORDS = new Set([
   "golang",
   "token",
   "tokens",
-  "usage",
-  "context",
-  "window",
-  "agent",
-  "agents",
   "codex",
-  "prompt",
-  "model",
-  "models",
   "wifi",
-  "calling",
-  "watch",
   "apple",
   "google",
   "groq",
@@ -331,26 +323,6 @@ const TECH_TERM_WORDS = new Set([
   "cerebras",
   "siliconflow",
   "ollama",
-  "dark",
-  "mode",
-  "auto",
-  "cache",
-  "proxy",
-  "plugin",
-  "extension",
-  "debug",
-  "build",
-  "release",
-  "error",
-  "warning",
-  "config",
-  "default",
-  "type",
-  "inference",
-  "zero",
-  "cost",
-  "server",
-  "client",
   "async",
   "await",
 ])
@@ -556,6 +528,25 @@ export function classifyTextBlock(
     }
   }
 
+  // 1b. Protect short non-sentence author / username / handle identifiers
+  if (options.elementRole === "author" && trimmed.length <= 48) {
+    const strippedForAuthor = stripTechnicalTokens(trimmed)
+    const authorWords = (strippedForAuthor.match(LATIN_WORD_RE) ?? []).map(normalizeWord)
+    const hasAuthorClause = authorWords.some((w) => STRONG_CLAUSE_MARKERS.has(w))
+    const tokenCount = trimmed.split(/\s+/).filter(Boolean).length
+    if (tokenCount <= 4 && !/[.?!。？！]/.test(trimmed) && !hasAuthorClause) {
+      return {
+        shouldTranslate: false,
+        detectedLanguage: "und",
+        reason: "author_or_username_protected",
+        confidence: 0.94,
+        hasForeignNaturalClause: false,
+        foreignProseWords: 0,
+        scripts,
+      }
+    }
+  }
+
   // 2. Japanese detection (must precede Han/Chinese check so Kanji-heavy Japanese is never misread as Chinese!)
   if (hasSignificantJapaneseKana(trimmed, scripts)) {
     const isTargetJa = targetCode === "ja"
@@ -677,14 +668,42 @@ export function classifyTextBlock(
   }
 
   if (contextMode === "partial-auto") {
-    // On a Chinese-dominant page, only translate standalone Latin blocks that look like real prose/comments,
-    // not 1-3 word navigation/badge labels like "Dark Mode", "Pull Requests", "Context Window".
-    const isStrongForeignProse =
-      (latinWords.length >= 4 && vowelWords.length >= 3 && nonTechLatinWords.length >= 2) ||
-      (latinWords.length >= 3 && hasClauseMarker && nonTechLatinWords.length >= 1) ||
-      (latinWords.length >= 2 && hasClauseMarker && hasSentencePunctuation)
+    // On a Chinese-dominant page, adapt strictness to element semantics: headings, comments,
+    // categories, and natural exclamations translate reliably while stray UI/tech badges stay skipped.
+    const elementRole = options.elementRole ?? "generic"
+    const hasExclamationOrQuestion = /[!?！？]/.test(trimmed)
+    let isPartialTranslatable: boolean
 
-    if (!isStrongForeignProse) {
+    if (elementRole === "heading") {
+      isPartialTranslatable =
+        (latinWords.length >= 2 && vowelWords.length >= 1 && nonTechLatinWords.length >= 1) ||
+        (latinWords.length === 1 &&
+          nonTechLatinWords.length === 1 &&
+          vowelWords.length === 1 &&
+          latinWords[0].length >= 4)
+    } else if (elementRole === "comment" || elementRole === "category") {
+      isPartialTranslatable =
+        latinWords.length >= 1 &&
+        vowelWords.length >= 1 &&
+        nonTechLatinWords.length >= 1 &&
+        (latinWords.length >= 2 || (latinWords[0]?.length ?? 0) >= 3)
+    } else if (elementRole === "control") {
+      isPartialTranslatable =
+        latinWords.length >= 1 &&
+        vowelWords.length >= 1 &&
+        nonTechLatinWords.length >= 1 &&
+        (latinWords.length >= 2 || (latinWords[0]?.length ?? 0) >= 4)
+    } else {
+      isPartialTranslatable =
+        (latinWords.length >= 4 && vowelWords.length >= 3 && nonTechLatinWords.length >= 2) ||
+        (latinWords.length >= 3 && hasClauseMarker && nonTechLatinWords.length >= 1) ||
+        (latinWords.length >= 2 && hasClauseMarker && hasSentencePunctuation) ||
+        (hasExclamationOrQuestion &&
+          nonTechLatinWords.some((w) => w.length >= 3) &&
+          vowelWords.length >= 1)
+    }
+
+    if (!isPartialTranslatable) {
       return {
         shouldTranslate: false,
         detectedLanguage: "und",

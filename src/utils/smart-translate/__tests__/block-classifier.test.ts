@@ -190,4 +190,82 @@ describe("classifyTextBlock", () => {
       expect(result.shouldTranslate, `Heading "${heading}" should translate in full-auto`).toBe(true)
     }
   })
+
+  it("preserves natural ALL-CAPS exclamations while keeping technical acronyms protected", () => {
+    expect(isPureTechnicalOrCodeBlock("YES!")).toBe(false)
+    expect(isPureTechnicalOrCodeBlock("NICE!")).toBe(false)
+    expect(isPureTechnicalOrCodeBlock("API")).toBe(true)
+    expect(isPureTechnicalOrCodeBlock("GPU SDK")).toBe(true)
+    expect(isPureTechnicalOrCodeBlock("MAX_RETRY")).toBe(true)
+
+    expect(
+      classifyTextBlock("YES!", {
+        targetCode: "zh-Hans",
+        contextMode: "partial-auto",
+      }).shouldTranslate,
+    ).toBe(true)
+  })
+
+  it("translates titles, short comments, and categories while protecting usernames under partial-auto", () => {
+    for (const title of ["Vanilla Expanded Framework", "Trailer Styled Zombat", "Settings"]) {
+      const res = classifyTextBlock(title, {
+        targetCode: "zh-Hans",
+        contextMode: "partial-auto",
+        elementRole: "heading",
+      })
+      expect(res.shouldTranslate, `Heading "${title}" should translate`).toBe(true)
+    }
+
+    for (const comment of ["Nice", "YES!", "Works great on 1.5"]) {
+      const res = classifyTextBlock(comment, {
+        targetCode: "zh-Hans",
+        contextMode: "partial-auto",
+        elementRole: "comment",
+      })
+      expect(res.shouldTranslate, `Comment "${comment}" should translate`).toBe(true)
+    }
+
+    for (const category of ["Models", "Textures", "Game Modes"]) {
+      const res = classifyTextBlock(category, {
+        targetCode: "zh-Hans",
+        contextMode: "partial-auto",
+        elementRole: "category",
+      })
+      expect(res.shouldTranslate, `Category "${category}" should translate`).toBe(true)
+    }
+
+    for (const author of ["Kasodus", "Sarg Bjornson", "Orion\n离线", "by legodude17"]) {
+      const res = classifyTextBlock(author, {
+        targetCode: "zh-Hans",
+        contextMode: "partial-auto",
+        elementRole: "author",
+      })
+      expect(res.shouldTranslate, `Author "${author}" should remain protected`).toBe(false)
+      expect(res.reason).toBe("author_or_username_protected")
+    }
+
+    const sentenceInAuthorElement = classifyTextBlock(
+      "I have updated this framework with full compatibility today.",
+      {
+        targetCode: "zh-Hans",
+        contextMode: "partial-auto",
+        elementRole: "author",
+      },
+    )
+    expect(sentenceInAuthorElement.shouldTranslate).toBe(true)
+
+    const controlButton = classifyTextBlock("Subscribe", {
+      targetCode: "zh-Hans",
+      contextMode: "partial-auto",
+      elementRole: "control",
+    })
+    expect(controlButton.shouldTranslate).toBe(true)
+
+    const controlTechAcronym = classifyTextBlock("API", {
+      targetCode: "zh-Hans",
+      contextMode: "partial-auto",
+      elementRole: "control",
+    })
+    expect(controlTechAcronym.shouldTranslate).toBe(false)
+  })
 })

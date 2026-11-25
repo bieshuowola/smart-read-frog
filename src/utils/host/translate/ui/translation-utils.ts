@@ -19,8 +19,30 @@ const COMPACT_ROLE_SET = new Set([
   "menuitemradio",
   "option",
   "switch",
-  "treeitem",
 ])
+
+const TITLE_OR_HEADING_TOKEN_SET = new Set(["title", "heading", "headline", "subject"])
+
+function hasTitleOrHeadingToken(el: HTMLElement): boolean {
+  const role = el.getAttribute("role")?.toLowerCase()
+  if (role === "heading") return true
+  const raw = `${typeof el.className === "string" ? el.className : ""} ${el.id || ""}`
+  if (!raw.trim()) return false
+  const tokens = raw
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+  return tokens.some((token) => TITLE_OR_HEADING_TOKEN_SET.has(token))
+}
+
+function hasHeadingOrTitleAncestor(el: HTMLElement): boolean {
+  let current: HTMLElement | null = el
+  for (let depth = 0; current && depth < 4; depth++) {
+    if (hasTitleOrHeadingToken(current)) return true
+    current = current.parentElement
+  }
+  return false
+}
 
 const COMPACT_INTERACTIVE_TAG_SET = new Set(["BUTTON", "OPTION", "SUMMARY"])
 const COMPACT_NAV_ANCESTOR_SELECTOR =
@@ -83,21 +105,32 @@ export function findCompactInteractiveHost(
   const candidate = isHTMLElement(first) ? first : first.parentElement
   if (!candidate) return null
 
-  // Never turn full prose blocks / headings / list paragraphs into in-place compact swaps.
-  if (
-    nodes.length === 1 &&
-    isHTMLElement(first) &&
-    /^(P|H1|H2|H3|H4|H5|H6|BLOCKQUOTE|ARTICLE|SECTION)$/.test(first.tagName)
-  ) {
-    return null
-  }
-  if (candidate.closest("p, blockquote, article") && !candidate.closest("button, [role='button'], [role='tab'], [role='menuitem']")) {
-    return null
+  // Never turn full prose blocks / headings / titles / labels / content regions into in-place swaps
+  // unless directly inside an explicit compact interactive trigger (button, tab, menuitem).
+  const insideExplicitCompactTrigger = Boolean(
+    candidate.closest('button, [role="button"], [role="tab"], [role="menuitem"]'),
+  )
+  if (!insideExplicitCompactTrigger) {
+    if (
+      nodes.length === 1 &&
+      isHTMLElement(first) &&
+      /^(P|H1|H2|H3|H4|H5|H6|BLOCKQUOTE|ARTICLE|SECTION|ASIDE|MAIN|LABEL)$/.test(first.tagName)
+    ) {
+      return null
+    }
+    if (
+      candidate.closest(
+        'h1, h2, h3, h4, h5, h6, p, blockquote, article, aside, main, label, [role="heading"]',
+      ) ||
+      hasHeadingOrTitleAncestor(candidate)
+    ) {
+      return null
+    }
   }
 
   // 1. Explicit interactive button / tab / menuitem / option / summary host
   const explicitControl = candidate.closest<HTMLElement>(
-    'button, option, summary, [role="button"], [role="tab"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"], [role="switch"], [role="treeitem"]',
+    'button, option, summary, [role="button"], [role="tab"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"], [role="switch"]',
   )
   if (explicitControl && explicitControl.textContent?.trim().length <= COMPACT_UI_MAX_CHARACTERS + 16) {
     return explicitControl
@@ -112,20 +145,12 @@ export function findCompactInteractiveHost(
     return candidate
   }
 
-  // 2. Short links/items inside navigation bars, headers, toolbars, or tablists
+  // 2. Short links/items inside navigation bars, headers, toolbars, or tablists (outside main/article/aside content)
   if (
     (candidate.tagName === "A" || candidate.tagName === "SPAN" || candidate.tagName === "LI") &&
     candidate.closest(COMPACT_NAV_ANCESTOR_SELECTOR) &&
+    !candidate.closest("main, article, aside") &&
     trimmed.length <= 36
-  ) {
-    return candidate
-  }
-
-  // 3. Single-line fixed-height or ellipsis-clipped short UI label
-  const style = window.getComputedStyle(candidate)
-  if (
-    (style.whiteSpace === "nowrap" || style.textOverflow === "ellipsis") &&
-    trimmed.length <= 32
   ) {
     return candidate
   }
