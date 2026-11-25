@@ -18,6 +18,7 @@ import {
   auditInlineAtomTokens,
   hasInlineAtomTokens,
 } from "@/utils/host/translate/inline-atom-tokens"
+import { normalizeForComparison } from "@/utils/host/translate/text-preparation"
 import { normalizePromptContextValue } from "@/utils/host/translate/translate-text"
 import { validateProviderHostedFeature } from "@/utils/hosted-ai/routing"
 import { createLogger } from "@/utils/logging/logger"
@@ -38,13 +39,35 @@ import {
 
 const log = createLogger("background/page-translation")
 
+function isEchoedMachineTranslation(
+  providerRef: SerializableProviderRef,
+  sourceText: string,
+  translatedText: string,
+): boolean {
+  if (!isNonAPIMachineProvider(providerRef) || isNoTranslationSentinel(translatedText)) {
+    return false
+  }
+  const normalizedSource = normalizeForComparison(sourceText)
+  return Boolean(normalizedSource) && normalizeForComparison(translatedText) === normalizedSource
+}
+
 async function getValidatedCachedTranslation(
   hash: string,
   sourceText: string,
   validateHtmlAttributeMarkers: boolean,
+  providerRef: SerializableProviderRef,
 ): Promise<TranslationCache | undefined> {
   const cached = await db.translationCache.get(hash)
   if (!cached) return undefined
+
+  // Evict legacy or transient echoed machine-translation entries so they never pin
+  // untranslated text across pages, engine fallbacks, or extension upgrades.
+  if (isEchoedMachineTranslation(providerRef, sourceText, cached.translation)) {
+    await db.translationCache.delete(hash)
+    log.debug("Evicted echoed machine-translation cache entry", { sourceText })
+    return undefined
+  }
+
   if (!validateHtmlAttributeMarkers) return cached
 
   try {
@@ -113,7 +136,12 @@ export function setupPageTranslationHandlers(): void {
     // Check cache first — unless the user asked for a fresh translation. The
     // existing entry is left untouched unless the fresh request succeeds below.
     if (hash && !forceRetranslation) {
-      const cached = await getValidatedCachedTranslation(hash, text, validateHtmlAttributeMarkers)
+      const cached = await getValidatedCachedTranslation(
+        hash,
+        text,
+        validateHtmlAttributeMarkers,
+        providerRef,
+      )
       if (cached) {
         // A "no translation needed" answer is cached like any other, so one
         // wrong verdict keeps a paragraph untranslated until the entry expires.
@@ -220,8 +248,13 @@ export function setupPageTranslationHandlers(): void {
       log.warn("Inline atom placeholders were not preserved; result not cached")
     }
 
-    // Cache the translation result if successful
-    if (result && hash && inlineAtomTokensIntact) {
+    const shouldPersistResult =
+      Boolean(result && hash && inlineAtomTokensIntact) &&
+      !isEchoedMachineTranslation(providerRef, text, result)
+
+    // Cache the translation result if successful (skip echoed MT responses so
+    // untranslated pass-throughs are never pinned in 7-day IndexedDB storage).
+    if (shouldPersistResult) {
       await db.translationCache.put({
         key: hash,
         translation: result,

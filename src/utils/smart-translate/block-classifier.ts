@@ -515,8 +515,14 @@ export function classifyTextBlock(
     }
   }
 
+  const technicalGuardOptions = {
+    allowReadableCompoundTitle:
+      options.elementRole === "heading" ||
+      (contextMode === "full-auto" && options.elementRole !== "author"),
+  }
+
   // 1. Protect pure code, CLI commands, JSON configs, paths, URLs, pure identifiers
-  if (isPureTechnicalOrCodeBlock(trimmed)) {
+  if (isPureTechnicalOrCodeBlock(trimmed, technicalGuardOptions)) {
     return {
       shouldTranslate: false,
       detectedLanguage: "und",
@@ -591,11 +597,37 @@ export function classifyTextBlock(
     }
   }
 
-  const stripped = stripTechnicalTokens(trimmed)
+  const stripped = stripTechnicalTokens(trimmed, technicalGuardOptions)
   const strippedScripts = analyzeScripts(stripped)
 
   // 5. Text with Chinese Han characters (pure Chinese OR Han + Latin mixed)
   if (scripts.han > 0) {
+    // Case 5.0: Multi-line heading combining a Chinese UI prefix with a standalone
+    // foreign title line (e.g. "订阅即可下载\nSlenderMan V2").
+    if (options.elementRole === "heading" && /\r?\n/.test(trimmed)) {
+      const lines = trimmed
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+      for (const line of lines) {
+        const lineScripts = analyzeScripts(line)
+        if (lineScripts.han === 0 && lineScripts.totalLetters > 0) {
+          const lineDecision = classifyTextBlock(line, options)
+          if (lineDecision.shouldTranslate) {
+            return {
+              shouldTranslate: true,
+              detectedLanguage: lineDecision.detectedLanguage === "und" ? "mixed" : lineDecision.detectedLanguage,
+              reason: "mixed_with_foreign_clause",
+              confidence: lineDecision.confidence,
+              hasForeignNaturalClause: true,
+              foreignProseWords: lineDecision.foreignProseWords,
+              scripts,
+            }
+          }
+        }
+      }
+    }
+
     const mixedAnalysis = analyzeMixedLatinSegments(stripped)
     const isTargetZh = isChineseTargetTag(targetCode)
 

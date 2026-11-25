@@ -22,6 +22,223 @@ const CAMEL_OR_INTERNAL_CAPS_RE = /\b[a-z]+[A-Z][a-zA-Z0-9]*\b|\b[A-Z][a-z]+[A-Z
 const KEBAB_IDENTIFIER_RE = /\b[a-z0-9]+-[a-z0-9]+(?:-[a-z0-9]+)*\b/g
 const ALL_CAPS_ACRONYM_RE = /\b[A-Z]{2,}(?:_[A-Z0-9]+)*\b/g
 const LATIN_UPPER_VOWEL_RE = /[AEIOUY]/
+const LATIN_VOWEL_RE = /[aeiouy]/i
+
+// Common programming/UI PascalCase identifier prefixes & suffixes that should remain protected
+// even when appearing in heading-like containers.
+const CODE_PASCAL_HEAD_WORDS = new Set([
+  "use",
+  "get",
+  "set",
+  "is",
+  "has",
+  "on",
+  "handle",
+  "create",
+  "render",
+  "init",
+  "parse",
+  "format",
+  "fetch",
+  "load",
+  "save",
+  "update",
+  "delete",
+  "remove",
+  "dispatch",
+  "resolve",
+  "compute",
+  "validate",
+])
+const CODE_PASCAL_TAIL_WORDS = new Set([
+  "impl",
+  "dto",
+  "dao",
+  "props",
+  "state",
+  "ctx",
+  "cfg",
+  "err",
+  "util",
+  "utils",
+  "helper",
+  "handler",
+  "callback",
+  "provider",
+  "context",
+  "reducer",
+  "middleware",
+  "controller",
+  "repository",
+  "factory",
+  "builder",
+  "validator",
+  "serializer",
+  "deserializer",
+  "component",
+  "element",
+  "registry",
+  "manager",
+  "service",
+  "client",
+  "server",
+  "config",
+  "options",
+  "schema",
+  "payload",
+  "response",
+  "request",
+  "error",
+  "exception",
+])
+
+// Technical console-command / snake_case prefixes (e.g. sv_consistency, cl_interp, mat_queue_mode)
+const TECH_SNAKE_PREFIXES = new Set([
+  "sv",
+  "cl",
+  "mp",
+  "r",
+  "mat",
+  "snd",
+  "net",
+  "con",
+  "hud",
+  "sys",
+  "cfg",
+  "db",
+  "api",
+  "ui",
+  "ux",
+  "env",
+  "fn",
+  "err",
+  "tmp",
+  "src",
+  "dst",
+  "ptr",
+  "idx",
+  "len",
+  "num",
+  "str",
+  "arr",
+  "obj",
+  "req",
+  "res",
+  "ctx",
+  "pkg",
+  "mod",
+])
+
+export interface TechnicalGuardOptions {
+  /**
+   * When true (e.g. heading / item title elements), human-readable Title-Cased
+   * compound names like "SlenderMan V2" or "Warcelona_part2" are expanded into
+   * readable word segments instead of being stripped as source-code identifiers.
+   * Lowercase camelCase, lowercase snake_case, ALL_CAPS constants, paths, URLs,
+   * CLI commands, and code syntax remain strictly protected.
+   */
+  allowReadableCompoundTitle?: boolean
+}
+
+function splitPascalSegments(token: string): string[] {
+  return token
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .replace(/([a-zA-Z])(\d)/g, "$1 $2")
+    .split(/\s+/)
+    .filter(Boolean)
+}
+
+function isReadablePascalTitleToken(token: string): boolean {
+  // Must start with uppercase (exclude camelCase like useEffect / getElementById)
+  if (!/^[A-Z][a-z]+[A-Z][a-zA-Z0-9]*$/.test(token)) return false
+  const segments = splitPascalSegments(token)
+  const wordSegments = segments.filter((seg) => /^[a-zA-Z]+$/.test(seg))
+  if (wordSegments.length < 2) return false
+  // Every alphabetic segment must look pronounceable (contains a vowel and length >= 2)
+  if (!wordSegments.every((seg) => seg.length >= 2 && LATIN_VOWEL_RE.test(seg))) {
+    return false
+  }
+  const firstLower = wordSegments[0]!.toLowerCase()
+  const lastLower = wordSegments.at(-1)!.toLowerCase()
+  if (CODE_PASCAL_HEAD_WORDS.has(firstLower) || CODE_PASCAL_TAIL_WORDS.has(lastLower)) {
+    return false
+  }
+  return true
+}
+
+function isReadableSnakeTitleToken(token: string): boolean {
+  // Must start with an uppercase letter (keeps lowercase snake_case like sv_consistency,
+  // snake_case_id, my_var_name strictly protected) and must NOT be ALL_CAPS constant.
+  if (!/^[A-Z][a-zA-Z0-9]*_[a-zA-Z0-9_]+$/.test(token)) return false
+  if (token === token.toUpperCase()) return false
+  const rawSegments = token.split("_").filter(Boolean)
+  if (rawSegments.length < 2) return false
+  if (TECH_SNAKE_PREFIXES.has(rawSegments[0]!.toLowerCase())) return false
+
+  // Expand trailing digits like "part2" -> ["part", "2"]
+  const expanded = rawSegments.flatMap((seg) =>
+    seg.replace(/([a-zA-Z])(\d)/g, "$1 $2").split(/\s+/).filter(Boolean),
+  )
+  const wordSegments = expanded.filter((seg) => /^[a-zA-Z]+$/.test(seg))
+  if (wordSegments.length < 2) return false
+  return wordSegments.some((seg) => seg.length >= 3 && LATIN_VOWEL_RE.test(seg))
+}
+
+function expandReadableCompoundToken(token: string): string {
+  return token
+    .replace(/_/g, " ")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .replace(/([a-zA-Z]{3,})(\d+)\b/g, "$1 $2")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+const STRICT_CODE_SYNTAX_RE = /[{};<>`\\]|=>|===|!==|::|->|\(\)/
+
+/**
+ * Normalize human-readable compound naming (e.g. "SlenderMan V2" -> "Slender Man V2",
+ * "Warcelona_part2" -> "Warcelona part 2") for a bounded second-pass MT retry when
+ * the primary machine translator echoes the source verbatim.
+ *
+ * Returns `null` when the text has no safe readable compound boundary to expand
+ * (including code blocks, URLs, paths, lowercase snake_case/camelCase, or plain words).
+ */
+export function normalizeCompoundTitleForMT(text: string): string | null {
+  const trimmed = text.trim()
+  if (!trimmed || trimmed.length > 160) return null
+  const hasBlockedSyntax =
+    URL_RE.test(trimmed) ||
+    EMAIL_RE.test(trimmed) ||
+    WINDOWS_PATH_RE.test(trimmed) ||
+    UNIX_PATH_RE.test(trimmed) ||
+    FILE_EXT_RE.test(trimmed) ||
+    STRICT_CODE_SYNTAX_RE.test(trimmed)
+  URL_RE.lastIndex = 0
+  EMAIL_RE.lastIndex = 0
+  WINDOWS_PATH_RE.lastIndex = 0
+  UNIX_PATH_RE.lastIndex = 0
+  FILE_EXT_RE.lastIndex = 0
+  if (hasBlockedSyntax) return null
+
+  let changed = false
+  const normalized = trimmed
+    .replace(SNAKE_CASE_RE, (token) => {
+      if (!isReadableSnakeTitleToken(token)) return token
+      changed = true
+      return expandReadableCompoundToken(token)
+    })
+    .replace(CAMEL_OR_INTERNAL_CAPS_RE, (token) => {
+      if (!isReadablePascalTitleToken(token)) return token
+      changed = true
+      return expandReadableCompoundToken(token)
+    })
+    .replace(/[^\S\r\n]+/g, " ")
+    .trim()
+
+  return changed && normalized !== trimmed ? normalized : null
+}
 const TECHNICAL_ALL_CAPS_WITH_VOWELS = new Set([
   "API",
   "AI",
@@ -121,7 +338,8 @@ const CODE_PUNCTUATION_RE = /[{}[\];<>`\\]|=>|===|!==|::|->|\(\)/g
  * Strip technical tokens (code, URLs, emails, paths, identifiers, versions)
  * so language & prose analysis inspects only natural-language text.
  */
-export function stripTechnicalTokens(text: string): string {
+export function stripTechnicalTokens(text: string, options?: TechnicalGuardOptions): string {
+  const allowReadableCompoundTitle = options?.allowReadableCompoundTitle === true
   return text
     .replace(INLINE_BACKTICK_RE, " ")
     .replace(URL_RE, " ")
@@ -137,8 +355,16 @@ export function stripTechnicalTokens(text: string): string {
     .replace(SEMVER_RE, " ")
     .replace(NUMBER_WITH_UNIT_RE, " ")
     .replace(DOT_IDENTIFIER_RE, " ")
-    .replace(SNAKE_CASE_RE, " ")
-    .replace(CAMEL_OR_INTERNAL_CAPS_RE, " ")
+    .replace(SNAKE_CASE_RE, (token) =>
+      allowReadableCompoundTitle && isReadableSnakeTitleToken(token)
+        ? expandReadableCompoundToken(token)
+        : " ",
+    )
+    .replace(CAMEL_OR_INTERNAL_CAPS_RE, (token) =>
+      allowReadableCompoundTitle && isReadablePascalTitleToken(token)
+        ? expandReadableCompoundToken(token)
+        : " ",
+    )
     .replace(KEBAB_IDENTIFIER_RE, " ")
     .replace(ALL_CAPS_ACRONYM_RE, (token) => (isTechnicalAcronym(token) ? " " : token))
     .replace(/\s+/g, " ")
@@ -202,14 +428,17 @@ function isLikelyCliCommand(trimmed: string): boolean {
  * Determine if an entire block is code, CLI command, JSON config, file path,
  * URL, or non-natural-language technical token list that must NEVER be translated.
  */
-export function isPureTechnicalOrCodeBlock(text: string): boolean {
+export function isPureTechnicalOrCodeBlock(
+  text: string,
+  options?: TechnicalGuardOptions,
+): boolean {
   const trimmed = text.trim()
   if (!trimmed) return true
 
   if (isLikelyJsonOrConfigBlock(trimmed)) return true
   if (isLikelyCliCommand(trimmed)) return true
 
-  const stripped = stripTechnicalTokens(trimmed)
+  const stripped = stripTechnicalTokens(trimmed, options)
   const strippedLetters = stripped.match(/\p{L}/gu)?.length ?? 0
 
   // If stripping technical tokens leaves almost no letters (<= 2 letters),

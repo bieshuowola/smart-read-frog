@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest"
 import { classifyTextBlock } from "../block-classifier"
-import { isPureTechnicalOrCodeBlock, stripTechnicalTokens } from "../code-and-tech-guard"
+import {
+  isPureTechnicalOrCodeBlock,
+  normalizeCompoundTitleForMT,
+  stripTechnicalTokens,
+} from "../code-and-tech-guard"
 
 describe("code-and-tech-guard", () => {
   it("protects CLI commands, JSON configs, paths, and identifiers", () => {
@@ -267,5 +271,59 @@ describe("classifyTextBlock", () => {
       elementRole: "control",
     })
     expect(controlTechAcronym.shouldTranslate).toBe(false)
+  })
+
+  it("translates readable PascalCase and Title_Snake headings while protecting code identifiers", () => {
+    for (const title of [
+      "SlenderMan V2",
+      "Warcelona_part2",
+      "DarkCarnival Remix",
+      "ResidentEvil 4 Remake",
+      "Minecraft_Shaders_v3",
+      "Glubtastic 5",
+    ]) {
+      const res = classifyTextBlock(title, {
+        targetCode: "zh-Hans",
+        contextMode: "partial-auto",
+        elementRole: "heading",
+      })
+      expect(res.shouldTranslate, `Compound heading "${title}" should translate`).toBe(true)
+    }
+
+    // Code / console / technical identifiers must stay protected even in heading roles
+    for (const tech of [
+      "sv_consistency 0",
+      "snake_case_id",
+      "useEffect",
+      "getElementById",
+      "MAX_RETRY",
+      "UserController",
+      "ErrorHandler",
+      "src/utils/main.ts",
+    ]) {
+      const res = classifyTextBlock(tech, {
+        targetCode: "zh-Hans",
+        contextMode: "partial-auto",
+        elementRole: "heading",
+      })
+      expect(res.shouldTranslate, `Technical identifier "${tech}" should stay protected`).toBe(false)
+    }
+
+    expect(normalizeCompoundTitleForMT("SlenderMan V2")).toBe("Slender Man V2")
+    expect(normalizeCompoundTitleForMT("Warcelona_part2")).toBe("Warcelona part 2")
+    expect(normalizeCompoundTitleForMT("订阅即可下载\nSlenderMan V2")).toBe("订阅即可下载\nSlender Man V2")
+    expect(normalizeCompoundTitleForMT("Glubtastic 5")).toBeNull()
+    expect(normalizeCompoundTitleForMT("sv_consistency 0")).toBeNull()
+    expect(normalizeCompoundTitleForMT("useEffect")).toBeNull()
+    expect(normalizeCompoundTitleForMT("MAX_RETRY")).toBeNull()
+    expect(normalizeCompoundTitleForMT("UserController")).toBeNull()
+
+    // Multi-line heading combining a localized Chinese prefix with a standalone foreign title line
+    const multiLineSubHeading = classifyTextBlock("订阅即可下载\nSlenderMan V2", {
+      targetCode: "zh-Hans",
+      contextMode: "partial-auto",
+      elementRole: "heading",
+    })
+    expect(multiLineSubHeading.shouldTranslate).toBe(true)
   })
 })

@@ -2313,5 +2313,152 @@ describe("translation queue helpers", () => {
       expect(settled[2]).toEqual({ status: "fulfilled", value: "ok:Gamma" })
       expect(settled[3]).toEqual({ status: "fulfilled", value: "ok:Delta" })
     })
+
+    it("recovers echoed compound titles via a single normalized Microsoft retry and skips persisting echoed originals", async () => {
+      vi.useFakeTimers()
+      const { fakeBrowser } = await import("wxt/testing/fake-browser")
+      const { CONFIG_STORAGE_KEY } = await import("@/utils/constants/config")
+      await fakeBrowser.storage.local.set({
+        [CONFIG_STORAGE_KEY]: {
+          ...DEFAULT_CONFIG,
+          pageTranslation: {
+            ...DEFAULT_CONFIG.pageTranslation,
+            microsoftGoogleFallback: true,
+          },
+        },
+      })
+
+      executeMicrosoftBatchTranslateMock.mockImplementation(async (texts: string[]) =>
+        texts.map((t) => {
+          if (t === "Slender Man V2") return "瘦长人 V2"
+          if (t === "Warcelona part 2") return "瓦塞罗那 第二部分"
+          return t // initial pass echoes SlenderMan V2, Warcelona_part2, and Glubtastic 5
+        }),
+      )
+
+      const { setupPageTranslationHandlers } = await import("../page-translation")
+      setupPageTranslationHandlers()
+      const send = getRegisteredMessageHandler("enqueueTranslateRequest")
+
+      const p1 = send({
+        data: {
+          text: "SlenderMan V2",
+          langConfig: { ...DEFAULT_CONFIG.language, targetCode: "zh-Hans" },
+          providerRef: localProviderRef(microsoftProvider),
+          scheduleAt: Date.now(),
+          hash: "echo-slender",
+        },
+      })
+      const p2 = send({
+        data: {
+          text: "Warcelona_part2",
+          langConfig: { ...DEFAULT_CONFIG.language, targetCode: "zh-Hans" },
+          providerRef: localProviderRef(microsoftProvider),
+          scheduleAt: Date.now(),
+          hash: "echo-warcelona",
+        },
+      })
+      const p3 = send({
+        data: {
+          text: "Glubtastic 5",
+          langConfig: { ...DEFAULT_CONFIG.language, targetCode: "zh-Hans" },
+          providerRef: localProviderRef(microsoftProvider),
+          scheduleAt: Date.now(),
+          hash: "echo-glubtastic",
+        },
+      })
+
+      await vi.advanceTimersByTimeAsync(100)
+      await expect(Promise.all([p1, p2, p3])).resolves.toEqual([
+        "瘦长人 V2",
+        "瓦塞罗那 第二部分",
+        "Glubtastic 5",
+      ])
+
+      // Single-word invented name "Glubtastic 5" must NOT trigger Google fallback or persist to IndexedDB
+      expect(executeTranslateMock).not.toHaveBeenCalled()
+      const persistedKeys = translationCachePutMock.mock.calls.map(([entry]) => entry.key)
+      expect(persistedKeys).toContain("echo-slender")
+      expect(persistedKeys).toContain("echo-warcelona")
+      expect(persistedKeys).not.toContain("echo-glubtastic")
+    })
+
+    it("uses bounded Google fallback for multi-word echoed phrases only when microsoftGoogleFallback is enabled", async () => {
+      vi.useFakeTimers()
+      const { fakeBrowser } = await import("wxt/testing/fake-browser")
+      const { CONFIG_STORAGE_KEY } = await import("@/utils/constants/config")
+      await fakeBrowser.storage.local.set({
+        [CONFIG_STORAGE_KEY]: {
+          ...DEFAULT_CONFIG,
+          pageTranslation: {
+            ...DEFAULT_CONFIG.pageTranslation,
+            microsoftGoogleFallback: true,
+          },
+        },
+      })
+
+      executeMicrosoftBatchTranslateMock.mockImplementation(async (texts: string[]) => texts)
+      executeTranslateMock.mockImplementation(
+        async (text: string, _lang: unknown, provider: ProviderConfig) => {
+          if (provider.provider === "google-translate" && text === "Silent Hill") {
+            return "寂静岭"
+          }
+          return text
+        },
+      )
+
+      const { setupPageTranslationHandlers } = await import("../page-translation")
+      setupPageTranslationHandlers()
+      const send = getRegisteredMessageHandler("enqueueTranslateRequest")
+
+      const p = send({
+        data: {
+          text: "Silent Hill",
+          langConfig: { ...DEFAULT_CONFIG.language, targetCode: "zh-Hans" },
+          providerRef: localProviderRef(microsoftProvider),
+          scheduleAt: Date.now(),
+          hash: "echo-multi-word",
+        },
+      })
+
+      await vi.advanceTimersByTimeAsync(100)
+      await expect(p).resolves.toBe("寂静岭")
+      expect(executeTranslateMock).toHaveBeenCalledTimes(1)
+    })
+
+    it("evicts legacy echoed machine-translation cache entries on read and fetches a fresh result", async () => {
+      vi.useFakeTimers()
+      translationCacheGetMock.mockResolvedValueOnce({
+        key: "legacy-echo-hash",
+        translation: "SlenderMan V2",
+      })
+      executeMicrosoftBatchTranslateMock.mockImplementation(async (texts: string[]) =>
+        texts.map((t) => (t === "Slender Man V2" ? "瘦长人 V2" : t)),
+      )
+
+      const { setupPageTranslationHandlers } = await import("../page-translation")
+      setupPageTranslationHandlers()
+      const send = getRegisteredMessageHandler("enqueueTranslateRequest")
+
+      const p = send({
+        data: {
+          text: "SlenderMan V2",
+          langConfig: { ...DEFAULT_CONFIG.language, targetCode: "zh-Hans" },
+          providerRef: localProviderRef(microsoftProvider),
+          scheduleAt: Date.now(),
+          hash: "legacy-echo-hash",
+        },
+      })
+
+      await vi.advanceTimersByTimeAsync(100)
+      await expect(p).resolves.toBe("瘦长人 V2")
+      expect(translationCacheDeleteMock).toHaveBeenCalledWith("legacy-echo-hash")
+      expect(translationCachePutMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          key: "legacy-echo-hash",
+          translation: "瘦长人 V2",
+        }),
+      )
+    })
   })
 })

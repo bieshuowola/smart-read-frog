@@ -18,6 +18,7 @@ import { BATCH_TIMEOUT_PER_CHAR_MS, MAX_BATCH_EXTRA_TIMEOUT_MS } from "@/utils/c
 import { getRandomUUID } from "@/utils/crypto-polyfill"
 import { Sha256Hex } from "@/utils/hash"
 import { executeMicrosoftBatchTranslate, executeTranslate } from "@/utils/host/translate/execute-translate"
+import { normalizeForComparison } from "@/utils/host/translate/text-preparation"
 import { requireHostedFeature } from "@/utils/hosted-ai/routing"
 import { createLogger } from "@/utils/logging/logger"
 import { getSubtitlesTranslatePrompt } from "@/utils/prompts/subtitles"
@@ -26,6 +27,8 @@ import { BatchQueue, PartialBatchOutcomesError } from "@/utils/request/batch-que
 import { CancelledScopeRegistry, isTranslationCancelledError } from "@/utils/request/cancellation"
 import { RequestQueue } from "@/utils/request/request-queue"
 import { executeTranslateWithFailover } from "@/utils/smart-translate/ai-failover"
+import { normalizeCompoundTitleForMT } from "@/utils/smart-translate/code-and-tech-guard"
+import { isChineseTargetTag } from "@/utils/smart-translate/script-analyzer"
 import { runStreamTextInBackground } from "./background-stream"
 import { ensureInitializedConfig } from "./config"
 
@@ -510,6 +513,169 @@ export const MT_BATCH_QUEUE_OPTIONS = {
   enableFallbackToIndividual: true,
 } as const
 
+const MAX_GOOGLE_ECHO_RECOVERIES_PER_BATCH = 4
+const LATIN_WORD_RE = /\p{Script=Latin}+(?:['’]\p{Script=Latin}+)*/gu
+const LATIN_VOWEL_RE = /[aeiouyàáâãäåæçèéêëìíîïñòóôõöøùúûüýÿ]/i
+const HAN_CHAR_RE = /\p{Script=Han}/u
+
+function isEchoedTranslation(sourceText: string, translatedText: string): boolean {
+  const normalizedSource = normalizeForComparison(sourceText)
+  if (!normalizedSource) return false
+  return normalizeForComparison(translatedText) === normalizedSource
+}
+
+/**
+ * Determine whether an echoed source string carries enough multi-word natural-language
+ * semantics to justify a single bounded fallback call to Google Translate (when enabled).
+ * Single invented/proper words like "Glubtastic 5" return false so we preserve the original
+ * instead of forcing hallucinated transliterations.
+ */
+function hasMultiWordTranslatableValue(
+  text: string,
+  targetCode: Config["language"]["targetCode"],
+): boolean {
+  const trimmed = text.trim()
+  if (!trimmed || trimmed.length > 200) return false
+  if (isChineseTargetTag(targetCode) && HAN_CHAR_RE.test(trimmed)) return false
+
+  const words = (trimmed.match(LATIN_WORD_RE) ?? []).filter(
+    (w) => w.length >= 2 && LATIN_VOWEL_RE.test(w),
+  )
+  return words.length >= 2
+}
+
+function isUsefulRecoveredTranslation(
+  sourceText: string,
+  candidateSource: string,
+  recoveredText: string,
+  targetCode: Config["language"]["targetCode"],
+): boolean {
+  const trimmed = recoveredText.trim()
+  if (!trimmed) return false
+  if (isEchoedTranslation(sourceText, trimmed) || isEchoedTranslation(candidateSource, trimmed)) {
+    return false
+  }
+  if (isChineseTargetTag(targetCode) && !HAN_CHAR_RE.test(trimmed)) {
+    return false
+  }
+  return true
+}
+
+async function recoverEchoedMicrosoftTranslations(
+  texts: readonly string[],
+  translations: string[],
+  langConfig: Config["language"],
+  provider: ProviderConfig,
+  options?: {
+    textFormat?: import("@/types/config/translate").TranslationTextFormat
+    preserveLineBreaks?: boolean
+    signal?: AbortSignal
+  },
+): Promise<string[]> {
+  if (
+    provider.provider !== "microsoft-translate" ||
+    options?.textFormat === "html" ||
+    options?.signal?.aborted
+  ) {
+    return translations
+  }
+
+  const results = [...translations]
+  const echoedIndices: number[] = []
+  for (let i = 0; i < texts.length; i++) {
+    if (isEchoedTranslation(texts[i]!, results[i] ?? "")) {
+      echoedIndices.push(i)
+    }
+  }
+  if (echoedIndices.length === 0) return results
+
+  // Pass 1: Bounded single Microsoft retry for human-readable compound naming
+  // (e.g. "SlenderMan V2" -> "Slender Man V2", "Warcelona_part2" -> "Warcelona part 2").
+  const normalizedCandidates: Array<{ index: number; normalized: string }> = []
+  for (const idx of echoedIndices) {
+    const normalized = normalizeCompoundTitleForMT(texts[idx]!)
+    if (normalized) {
+      normalizedCandidates.push({ index: idx, normalized })
+    }
+  }
+
+  if (normalizedCandidates.length > 0 && !options?.signal?.aborted) {
+    try {
+      const normalizedTexts = normalizedCandidates.map((c) => c.normalized)
+      const retried =
+        typeof executeMicrosoftBatchTranslate === "function"
+          ? await executeMicrosoftBatchTranslate(normalizedTexts, langConfig, provider, {
+              signal: options?.signal,
+            })
+          : await Promise.all(
+              normalizedTexts.map((t) =>
+                executeTranslate(t, langConfig, provider, getTranslatePrompt, {
+                  textFormat: "plain",
+                  preserveLineBreaks: options?.preserveLineBreaks,
+                  signal: options?.signal,
+                }),
+              ),
+            )
+
+      for (let i = 0; i < normalizedCandidates.length; i++) {
+        const { index, normalized } = normalizedCandidates[i]!
+        const candidate = retried[i] ?? ""
+        if (isUsefulRecoveredTranslation(texts[index]!, normalized, candidate, langConfig.targetCode)) {
+          results[index] = candidate
+        }
+      }
+    } catch (error) {
+      if (options?.signal?.aborted || isTranslationCancelledError(error)) {
+        throw error
+      }
+      log.debug("Normalized compound-title retry via Microsoft failed; keeping original", { error })
+    }
+  }
+
+  // Pass 2: For items still echoed verbatim that have clear multi-word natural-language value,
+  // allow at most one bounded Google Translate fallback ONLY when user-enabled.
+  const remainingEchoes = echoedIndices
+    .filter((idx) => isEchoedTranslation(texts[idx]!, results[idx] ?? ""))
+    .map((idx) => {
+      const source = texts[idx]!
+      const queryText = normalizeCompoundTitleForMT(source) ?? source
+      return { index: idx, source, queryText }
+    })
+    .filter(({ queryText }) => hasMultiWordTranslatableValue(queryText, langConfig.targetCode))
+    .slice(0, MAX_GOOGLE_ECHO_RECOVERIES_PER_BATCH)
+
+  if (remainingEchoes.length === 0 || options?.signal?.aborted) {
+    return results
+  }
+
+  const config = await storage.getItem<Config>(`local:${CONFIG_STORAGE_KEY}`).catch(() => null)
+  if (!config?.pageTranslation?.microsoftGoogleFallback) {
+    return results
+  }
+
+  await Promise.allSettled(
+    remainingEchoes.map(async ({ index, source, queryText }) => {
+      if (options?.signal?.aborted) return
+      const googleResult = await executeTranslate(
+        queryText,
+        langConfig,
+        DEFAULT_PROVIDER_CONFIG["google-translate"],
+        getTranslatePrompt,
+        {
+          textFormat: "plain",
+          preserveLineBreaks: options?.preserveLineBreaks,
+          signal: options?.signal,
+        },
+      )
+      if (isUsefulRecoveredTranslation(source, queryText, googleResult, langConfig.targetCode)) {
+        results[index] = googleResult
+      }
+    }),
+  )
+
+  return results
+}
+
 /**
  * Execute a non-API machine translation task (Microsoft or Google).
  * If Microsoft fails and `pageTranslation.microsoftGoogleFallback` is enabled by the user,
@@ -526,7 +692,18 @@ export async function executeMachineTranslationWithFallback(
   },
 ): Promise<string> {
   try {
-    return await executeTranslate(text, langConfig, provider, getTranslatePrompt, options)
+    const translated = await executeTranslate(text, langConfig, provider, getTranslatePrompt, options)
+    if (provider.provider === "microsoft-translate" && isEchoedTranslation(text, translated)) {
+      const [recovered] = await recoverEchoedMicrosoftTranslations(
+        [text],
+        [translated],
+        langConfig,
+        provider,
+        options,
+      )
+      return recovered ?? translated
+    }
+    return translated
   } catch (error) {
     if (
       provider.provider !== "microsoft-translate" ||
@@ -564,16 +741,23 @@ export async function executeMicrosoftBatchWithFallback(
   const texts = dataList.map((d) => d.text)
 
   try {
-    if (typeof executeMicrosoftBatchTranslate === "function") {
-      return await executeMicrosoftBatchTranslate(texts, first.langConfig, provider, { signal })
-    }
-    return await Promise.all(
-      texts.map((text) =>
-        executeTranslate(text, first.langConfig, provider, getTranslatePrompt, {
-          textFormat: "plain",
-          signal,
-        }),
-      ),
+    const translated =
+      typeof executeMicrosoftBatchTranslate === "function"
+        ? await executeMicrosoftBatchTranslate(texts, first.langConfig, provider, { signal })
+        : await Promise.all(
+            texts.map((text) =>
+              executeTranslate(text, first.langConfig, provider, getTranslatePrompt, {
+                textFormat: "plain",
+                signal,
+              }),
+            ),
+          )
+    return await recoverEchoedMicrosoftTranslations(
+      texts,
+      translated,
+      first.langConfig,
+      provider,
+      { textFormat: "plain", signal },
     )
   } catch (error) {
     if (signal?.aborted || isTranslationCancelledError(error)) {
